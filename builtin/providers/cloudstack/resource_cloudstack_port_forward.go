@@ -2,11 +2,11 @@ package cloudstack
 
 import (
 	"fmt"
-	"sync"
-	"time"
-
+	"log"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/terraform/helper/schema"
@@ -21,7 +21,7 @@ func resourceCloudStackPortForward() *schema.Resource {
 		Delete: resourceCloudStackPortForwardDelete,
 
 		Schema: map[string]*schema.Schema{
-			"ipaddress": &schema.Schema{
+			"ip_address_id": &schema.Schema{
 				Type:     schema.TypeString,
 				Required: true,
 				ForceNew: true,
@@ -31,6 +31,12 @@ func resourceCloudStackPortForward() *schema.Resource {
 				Type:     schema.TypeBool,
 				Optional: true,
 				Default:  false,
+			},
+
+			"project": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+				ForceNew: true,
 			},
 
 			"forward": &schema.Schema{
@@ -53,9 +59,14 @@ func resourceCloudStackPortForward() *schema.Resource {
 							Required: true,
 						},
 
-						"virtual_machine": &schema.Schema{
+						"virtual_machine_id": &schema.Schema{
 							Type:     schema.TypeString,
 							Required: true,
+						},
+
+						"vm_guest_ip": &schema.Schema{
+							Type:     schema.TypeString,
+							Optional: true,
 						},
 
 						"uuid": &schema.Schema{
@@ -70,16 +81,8 @@ func resourceCloudStackPortForward() *schema.Resource {
 }
 
 func resourceCloudStackPortForwardCreate(d *schema.ResourceData, meta interface{}) error {
-	cs := meta.(*cloudstack.CloudStackClient)
-
-	// Retrieve the ipaddress ID
-	ipaddressid, e := retrieveID(cs, "ipaddress", d.Get("ipaddress").(string))
-	if e != nil {
-		return e.Error()
-	}
-
 	// We need to set this upfront in order to be able to save a partial state
-	d.SetId(ipaddressid)
+	d.SetId(d.Get("ip_address_id").(string))
 
 	// Create all forwards that are configured
 	if nrs := d.Get("forward").(*schema.Set); nrs.Len() > 0 {
@@ -99,11 +102,7 @@ func resourceCloudStackPortForwardCreate(d *schema.ResourceData, meta interface{
 	return resourceCloudStackPortForwardRead(d, meta)
 }
 
-func createPortForwards(
-	d *schema.ResourceData,
-	meta interface{},
-	forwards *schema.Set,
-	nrs *schema.Set) error {
+func createPortForwards(d *schema.ResourceData, meta interface{}, forwards *schema.Set, nrs *schema.Set) error {
 	var errs *multierror.Error
 
 	var wg sync.WaitGroup
@@ -138,10 +137,8 @@ func createPortForwards(
 
 	return errs.ErrorOrNil()
 }
-func createPortForward(
-	d *schema.ResourceData,
-	meta interface{},
-	forward map[string]interface{}) error {
+
+func createPortForward(d *schema.ResourceData, meta interface{}, forward map[string]interface{}) error {
 	cs := meta.(*cloudstack.CloudStackClient)
 
 	// Make sure all required parameters are there
@@ -149,13 +146,10 @@ func createPortForward(
 		return err
 	}
 
-	// Retrieve the virtual_machine ID
-	virtualmachineid, e := retrieveID(cs, "virtual_machine", forward["virtual_machine"].(string))
-	if e != nil {
-		return e.Error()
-	}
-
-	vm, _, err := cs.VirtualMachine.GetVirtualMachineByID(virtualmachineid)
+	vm, _, err := cs.VirtualMachine.GetVirtualMachineByID(
+		forward["virtual_machine_id"].(string),
+		cloudstack.WithProject(d.Get("project").(string)),
+	)
 	if err != nil {
 		return err
 	}
@@ -164,9 +158,28 @@ func createPortForward(
 	p := cs.Firewall.NewCreatePortForwardingRuleParams(d.Id(), forward["private_port"].(int),
 		forward["protocol"].(string), forward["public_port"].(int), vm.Id)
 
-	// Set the network ID of the default network, needed when public IP address
-	// is not associated with any Guest network yet (VPC case)
-	p.SetNetworkid(vm.Nic[0].Networkid)
+	if vmGuestIP, ok := forward["vm_guest_ip"]; ok && vmGuestIP.(string) != "" {
+		p.SetVmguestip(vmGuestIP.(string))
+
+		// Set the network ID based on the guest IP, needed when the public IP address
+		// is not associated with any network yet
+	NICS:
+		for _, nic := range vm.Nic {
+			if vmGuestIP.(string) == nic.Ipaddress {
+				p.SetNetworkid(nic.Networkid)
+				break NICS
+			}
+			for _, ip := range nic.Secondaryip {
+				if vmGuestIP.(string) == ip.Ipaddress {
+					p.SetNetworkid(nic.Networkid)
+					break NICS
+				}
+			}
+		}
+	} else {
+		// If no guest IP is configured, use the primary NIC
+		p.SetNetworkid(vm.Nic[0].Networkid)
+	}
 
 	// Do not open the firewall automatically in any case
 	p.SetOpenfirewall(false)
@@ -184,10 +197,30 @@ func createPortForward(
 func resourceCloudStackPortForwardRead(d *schema.ResourceData, meta interface{}) error {
 	cs := meta.(*cloudstack.CloudStackClient)
 
+	// First check if the IP address is still associated
+	_, count, err := cs.Address.GetPublicIpAddressByID(
+		d.Id(),
+		cloudstack.WithProject(d.Get("project").(string)),
+	)
+	if err != nil {
+		if count == 0 {
+			log.Printf(
+				"[DEBUG] IP address with ID %s is no longer associated", d.Id())
+			d.SetId("")
+			return nil
+		}
+
+		return err
+	}
+
 	// Get all the forwards from the running environment
 	p := cs.Firewall.NewListPortForwardingRulesParams()
 	p.SetIpaddressid(d.Id())
 	p.SetListall(true)
+
+	if err := setProjectid(p, cs, d); err != nil {
+		return err
+	}
 
 	l, err := cs.Firewall.ListPortForwardingRules(p)
 	if err != nil {
@@ -237,11 +270,13 @@ func resourceCloudStackPortForwardRead(d *schema.ResourceData, meta interface{})
 			forward["protocol"] = f.Protocol
 			forward["private_port"] = privPort
 			forward["public_port"] = pubPort
+			forward["virtual_machine_id"] = f.Virtualmachineid
 
-			if isID(forward["virtual_machine"].(string)) {
-				forward["virtual_machine"] = f.Virtualmachineid
-			} else {
-				forward["virtual_machine"] = f.Virtualmachinename
+			// This one is a bit tricky. We only want to update this optional value
+			// if we've set one ourselves. If not this would become a computed value
+			// and that would mess up the calculated hash of the set item.
+			if forward["vm_guest_ip"].(string) != "" {
+				forward["vm_guest_ip"] = f.Vmguestip
 			}
 
 			forwards.Add(forward)
@@ -254,11 +289,11 @@ func resourceCloudStackPortForwardRead(d *schema.ResourceData, meta interface{})
 		for uuid := range forwardMap {
 			// Make a dummy forward to hold the unknown UUID
 			forward := map[string]interface{}{
-				"protocol":        uuid,
-				"private_port":    0,
-				"public_port":     0,
-				"virtual_machine": uuid,
-				"uuid":            uuid,
+				"protocol":           uuid,
+				"private_port":       0,
+				"public_port":        0,
+				"virtual_machine_id": uuid,
+				"uuid":               uuid,
 			}
 
 			// Add the dummy forward to the forwards set
@@ -288,9 +323,9 @@ func resourceCloudStackPortForwardUpdate(d *schema.ResourceData, meta interface{
 		// set to make sure we end up in a consistent state
 		forwards := o.(*schema.Set).Intersection(n.(*schema.Set))
 
-		// First loop through all the new forwards and create (before destroy) them
-		if nrs.Len() > 0 {
-			err := createPortForwards(d, meta, forwards, nrs)
+		// First loop through all the old forwards and delete them
+		if ors.Len() > 0 {
+			err := deletePortForwards(d, meta, forwards, ors)
 
 			// We need to update this first to preserve the correct state
 			d.Set("forward", forwards)
@@ -300,9 +335,9 @@ func resourceCloudStackPortForwardUpdate(d *schema.ResourceData, meta interface{
 			}
 		}
 
-		// Then loop through all the old forwards and delete them
-		if ors.Len() > 0 {
-			err := deletePortForwards(d, meta, forwards, ors)
+		// Then loop through all the new forwards and create them
+		if nrs.Len() > 0 {
+			err := createPortForwards(d, meta, forwards, nrs)
 
 			// We need to update this first to preserve the correct state
 			d.Set("forward", forwards)
@@ -336,11 +371,7 @@ func resourceCloudStackPortForwardDelete(d *schema.ResourceData, meta interface{
 	return nil
 }
 
-func deletePortForwards(
-	d *schema.ResourceData,
-	meta interface{},
-	forwards *schema.Set,
-	ors *schema.Set) error {
+func deletePortForwards(d *schema.ResourceData, meta interface{}, forwards *schema.Set, ors *schema.Set) error {
 	var errs *multierror.Error
 
 	var wg sync.WaitGroup
@@ -376,10 +407,7 @@ func deletePortForwards(
 	return errs.ErrorOrNil()
 }
 
-func deletePortForward(
-	d *schema.ResourceData,
-	meta interface{},
-	forward map[string]interface{}) error {
+func deletePortForward(d *schema.ResourceData, meta interface{}, forward map[string]interface{}) error {
 	cs := meta.(*cloudstack.CloudStackClient)
 
 	// Create the parameter struct

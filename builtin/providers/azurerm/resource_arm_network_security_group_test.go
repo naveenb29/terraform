@@ -5,19 +5,20 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/hashicorp/terraform/helper/acctest"
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/terraform"
 )
 
 func TestAccAzureRMNetworkSecurityGroup_basic(t *testing.T) {
-
+	rInt := acctest.RandInt()
 	resource.Test(t, resource.TestCase{
 		PreCheck:     func() { testAccPreCheck(t) },
 		Providers:    testAccProviders,
 		CheckDestroy: testCheckAzureRMNetworkSecurityGroupDestroy,
 		Steps: []resource.TestStep{
-			resource.TestStep{
-				Config: testAccAzureRMNetworkSecurityGroup_basic,
+			{
+				Config: testAccAzureRMNetworkSecurityGroup_basic(rInt),
 				Check: resource.ComposeTestCheckFunc(
 					testCheckAzureRMNetworkSecurityGroupExists("azurerm_network_security_group.test"),
 				),
@@ -26,19 +27,38 @@ func TestAccAzureRMNetworkSecurityGroup_basic(t *testing.T) {
 	})
 }
 
-func TestAccAzureRMNetworkSecurityGroup_withTags(t *testing.T) {
-
+func TestAccAzureRMNetworkSecurityGroup_disappears(t *testing.T) {
+	rInt := acctest.RandInt()
 	resource.Test(t, resource.TestCase{
 		PreCheck:     func() { testAccPreCheck(t) },
 		Providers:    testAccProviders,
 		CheckDestroy: testCheckAzureRMNetworkSecurityGroupDestroy,
 		Steps: []resource.TestStep{
-			resource.TestStep{
-				Config: testAccAzureRMNetworkSecurityGroup_withTags,
+			{
+				Config: testAccAzureRMNetworkSecurityGroup_basic(rInt),
+				Check: resource.ComposeTestCheckFunc(
+					testCheckAzureRMNetworkSecurityGroupExists("azurerm_network_security_group.test"),
+					testCheckAzureRMNetworkSecurityGroupDisappears("azurerm_network_security_group.test"),
+				),
+				ExpectNonEmptyPlan: true,
+			},
+		},
+	})
+}
+
+func TestAccAzureRMNetworkSecurityGroup_withTags(t *testing.T) {
+	rInt := acctest.RandInt()
+	resource.Test(t, resource.TestCase{
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testCheckAzureRMNetworkSecurityGroupDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccAzureRMNetworkSecurityGroup_withTags(rInt),
 				Check: resource.ComposeTestCheckFunc(
 					testCheckAzureRMNetworkSecurityGroupExists("azurerm_network_security_group.test"),
 					resource.TestCheckResourceAttr(
-						"azurerm_network_security_group.test", "tags.#", "2"),
+						"azurerm_network_security_group.test", "tags.%", "2"),
 					resource.TestCheckResourceAttr(
 						"azurerm_network_security_group.test", "tags.environment", "Production"),
 					resource.TestCheckResourceAttr(
@@ -46,12 +66,12 @@ func TestAccAzureRMNetworkSecurityGroup_withTags(t *testing.T) {
 				),
 			},
 
-			resource.TestStep{
-				Config: testAccAzureRMNetworkSecurityGroup_withTagsUpdate,
+			{
+				Config: testAccAzureRMNetworkSecurityGroup_withTagsUpdate(rInt),
 				Check: resource.ComposeTestCheckFunc(
 					testCheckAzureRMNetworkSecurityGroupExists("azurerm_network_security_group.test"),
 					resource.TestCheckResourceAttr(
-						"azurerm_network_security_group.test", "tags.#", "1"),
+						"azurerm_network_security_group.test", "tags.%", "1"),
 					resource.TestCheckResourceAttr(
 						"azurerm_network_security_group.test", "tags.environment", "staging"),
 				),
@@ -61,14 +81,14 @@ func TestAccAzureRMNetworkSecurityGroup_withTags(t *testing.T) {
 }
 
 func TestAccAzureRMNetworkSecurityGroup_addingExtraRules(t *testing.T) {
-
+	rInt := acctest.RandInt()
 	resource.Test(t, resource.TestCase{
 		PreCheck:     func() { testAccPreCheck(t) },
 		Providers:    testAccProviders,
 		CheckDestroy: testCheckAzureRMNetworkSecurityGroupDestroy,
 		Steps: []resource.TestStep{
-			resource.TestStep{
-				Config: testAccAzureRMNetworkSecurityGroup_basic,
+			{
+				Config: testAccAzureRMNetworkSecurityGroup_basic(rInt),
 				Check: resource.ComposeTestCheckFunc(
 					testCheckAzureRMNetworkSecurityGroupExists("azurerm_network_security_group.test"),
 					resource.TestCheckResourceAttr(
@@ -76,8 +96,8 @@ func TestAccAzureRMNetworkSecurityGroup_addingExtraRules(t *testing.T) {
 				),
 			},
 
-			resource.TestStep{
-				Config: testAccAzureRMNetworkSecurityGroup_anotherRule,
+			{
+				Config: testAccAzureRMNetworkSecurityGroup_anotherRule(rInt),
 				Check: resource.ComposeTestCheckFunc(
 					testCheckAzureRMNetworkSecurityGroupExists("azurerm_network_security_group.test"),
 					resource.TestCheckResourceAttr(
@@ -117,6 +137,31 @@ func testCheckAzureRMNetworkSecurityGroupExists(name string) resource.TestCheckF
 	}
 }
 
+func testCheckAzureRMNetworkSecurityGroupDisappears(name string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+
+		rs, ok := s.RootModule().Resources[name]
+		if !ok {
+			return fmt.Errorf("Not found: %s", name)
+		}
+
+		sgName := rs.Primary.Attributes["name"]
+		resourceGroup, hasResourceGroup := rs.Primary.Attributes["resource_group_name"]
+		if !hasResourceGroup {
+			return fmt.Errorf("Bad: no resource group found in state for network security group: %s", sgName)
+		}
+
+		conn := testAccProvider.Meta().(*ArmClient).secGroupClient
+
+		_, err := conn.Delete(resourceGroup, sgName, make(chan struct{}))
+		if err != nil {
+			return fmt.Errorf("Bad: Delete on secGroupClient: %s", err)
+		}
+
+		return nil
+	}
+}
+
 func testCheckAzureRMNetworkSecurityGroupDestroy(s *terraform.State) error {
 	conn := testAccProvider.Meta().(*ArmClient).secGroupClient
 
@@ -135,16 +180,17 @@ func testCheckAzureRMNetworkSecurityGroupDestroy(s *terraform.State) error {
 		}
 
 		if resp.StatusCode != http.StatusNotFound {
-			return fmt.Errorf("Network Security Group still exists:\n%#v", resp.Properties)
+			return fmt.Errorf("Network Security Group still exists:\n%#v", resp.SecurityGroupPropertiesFormat)
 		}
 	}
 
 	return nil
 }
 
-var testAccAzureRMNetworkSecurityGroup_basic = `
+func testAccAzureRMNetworkSecurityGroup_basic(rInt int) string {
+	return fmt.Sprintf(`
 resource "azurerm_resource_group" "test" {
-    name = "acceptanceTestResourceGroup1"
+    name = "acctestRG-%d"
     location = "West US"
 }
 
@@ -165,11 +211,13 @@ resource "azurerm_network_security_group" "test" {
     	destination_address_prefix = "*"
     }
 }
-`
+`, rInt)
+}
 
-var testAccAzureRMNetworkSecurityGroup_anotherRule = `
+func testAccAzureRMNetworkSecurityGroup_anotherRule(rInt int) string {
+	return fmt.Sprintf(`
 resource "azurerm_resource_group" "test" {
-    name = "acceptanceTestResourceGroup1"
+    name = "acctestRG-%d"
     location = "West US"
 }
 
@@ -202,11 +250,13 @@ resource "azurerm_network_security_group" "test" {
     	destination_address_prefix = "*"
     }
 }
-`
+`, rInt)
+}
 
-var testAccAzureRMNetworkSecurityGroup_withTags = `
+func testAccAzureRMNetworkSecurityGroup_withTags(rInt int) string {
+	return fmt.Sprintf(`
 resource "azurerm_resource_group" "test" {
-    name = "acceptanceTestResourceGroup1"
+    name = "acctestRG-%d"
     location = "West US"
 }
 
@@ -233,11 +283,13 @@ resource "azurerm_network_security_group" "test" {
 	cost_center = "MSFT"
     }
 }
-`
+`, rInt)
+}
 
-var testAccAzureRMNetworkSecurityGroup_withTagsUpdate = `
+func testAccAzureRMNetworkSecurityGroup_withTagsUpdate(rInt int) string {
+	return fmt.Sprintf(`
 resource "azurerm_resource_group" "test" {
-    name = "acceptanceTestResourceGroup1"
+    name = "acctestRG-%d"
     location = "West US"
 }
 
@@ -262,4 +314,5 @@ resource "azurerm_network_security_group" "test" {
 	environment = "staging"
     }
 }
-`
+`, rInt)
+}

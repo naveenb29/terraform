@@ -18,49 +18,54 @@ func resourceDigitalOceanRecord() *schema.Resource {
 		Delete: resourceDigitalOceanRecordDelete,
 
 		Schema: map[string]*schema.Schema{
-			"type": &schema.Schema{
+			"type": {
 				Type:     schema.TypeString,
 				Required: true,
 				ForceNew: true,
 			},
 
-			"domain": &schema.Schema{
+			"domain": {
 				Type:     schema.TypeString,
 				Required: true,
 				ForceNew: true,
 			},
 
-			"name": &schema.Schema{
+			"name": {
 				Type:     schema.TypeString,
 				Optional: true,
 			},
 
-			"port": &schema.Schema{
+			"port": {
 				Type:     schema.TypeString,
 				Optional: true,
 				Computed: true,
 				ForceNew: true,
 			},
 
-			"priority": &schema.Schema{
+			"priority": {
 				Type:     schema.TypeString,
 				Optional: true,
 				Computed: true,
 				ForceNew: true,
 			},
 
-			"weight": &schema.Schema{
+			"weight": {
 				Type:     schema.TypeString,
 				Optional: true,
 				Computed: true,
 				ForceNew: true,
 			},
 
-			"value": &schema.Schema{
+			"value": {
 				Type:     schema.TypeString,
 				Optional: true,
 				Computed: true,
 				ForceNew: true,
+			},
+
+			"fqdn": {
+				Type:     schema.TypeString,
+				Computed: true,
 			},
 		},
 	}
@@ -146,6 +151,10 @@ func resourceDigitalOceanRecordRead(d *schema.ResourceData, meta interface{}) er
 	d.Set("priority", strconv.Itoa(rec.Priority))
 	d.Set("port", strconv.Itoa(rec.Port))
 
+	en := constructFqdn(rec.Name, d.Get("domain").(string))
+	log.Printf("[DEBUG] Constructed FQDN: %s", en)
+	d.Set("fqdn", en)
+
 	return nil
 }
 
@@ -195,4 +204,13 @@ func resourceDigitalOceanRecordDelete(d *schema.ResourceData, meta interface{}) 
 	}
 
 	return nil
+}
+
+func constructFqdn(name, domain string) string {
+	rn := strings.ToLower(strings.TrimSuffix(name, "."))
+	domain = strings.TrimSuffix(domain, ".")
+	if !strings.HasSuffix(rn, domain) {
+		rn = strings.Join([]string{name, domain}, ".")
+	}
+	return rn
 }

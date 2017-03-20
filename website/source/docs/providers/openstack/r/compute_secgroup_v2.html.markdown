@@ -14,19 +14,21 @@ Manages a V2 security group resource within OpenStack.
 
 ```
 resource "openstack_compute_secgroup_v2" "secgroup_1" {
-  name = "my_secgroup"
+  name        = "my_secgroup"
   description = "my security group"
+
   rule {
-    from_port = 22
-    to_port = 22
+    from_port   = 22
+    to_port     = 22
     ip_protocol = "tcp"
-    cidr = "0.0.0.0/0"
+    cidr        = "0.0.0.0/0"
   }
+
   rule {
-    from_port = 80
-    to_port = 80
+    from_port   = 80
+    to_port     = 80
     ip_protocol = "tcp"
-    cidr = "0.0.0.0/0"
+    cidr        = "0.0.0.0/0"
   }
 }
 ```
@@ -107,10 +109,18 @@ When referencing a security group in a configuration (for example, a configurati
 
 ```
 resource "openstack_compute_instance_v2" "test-server" {
-  name = "tf-test"
-  image_id = "ad091b52-742f-469e-8f3c-fd81cadf0743"
-  flavor_id = "3"
-  key_pair = "my_key_pair_name"
+  name            = "tf-test"
+  image_id        = "ad091b52-742f-469e-8f3c-fd81cadf0743"
+  flavor_id       = "3"
+  key_pair        = "my_key_pair_name"
   security_groups = ["${openstack_compute_secgroup_v2.secgroup_1.name}"]
 }
+```
+
+## Import
+
+Security Groups can be imported using the `id`, e.g.
+
+```
+$ terraform import openstack_compute_secgroup_v2.my_secgroup 1bc30ee9-9d5b-4c30-bdd5-7f1e663f5edf
 ```

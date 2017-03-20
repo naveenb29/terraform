@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/servergroups"
 	"github.com/hashicorp/terraform/helper/schema"
-	"github.com/rackspace/gophercloud/openstack/compute/v2/extensions/servergroups"
 )
 
 func resourceComputeServerGroupV2() *schema.Resource {
@@ -14,13 +14,16 @@ func resourceComputeServerGroupV2() *schema.Resource {
 		Read:   resourceComputeServerGroupV2Read,
 		Update: nil,
 		Delete: resourceComputeServerGroupV2Delete,
+		Importer: &schema.ResourceImporter{
+			State: schema.ImportStatePassthrough,
+		},
 
 		Schema: map[string]*schema.Schema{
 			"region": &schema.Schema{
 				Type:        schema.TypeString,
 				Required:    true,
 				ForceNew:    true,
-				DefaultFunc: envDefaultFuncAllowMissing("OS_REGION_NAME"),
+				DefaultFunc: schema.EnvDefaultFunc("OS_REGION_NAME", ""),
 			},
 			"name": &schema.Schema{
 				Type:     schema.TypeString,
@@ -44,7 +47,7 @@ func resourceComputeServerGroupV2() *schema.Resource {
 
 func resourceComputeServerGroupV2Create(d *schema.ResourceData, meta interface{}) error {
 	config := meta.(*Config)
-	computeClient, err := config.computeV2Client(d.Get("region").(string))
+	computeClient, err := config.computeV2Client(GetRegion(d))
 	if err != nil {
 		return fmt.Errorf("Error creating OpenStack compute client: %s", err)
 	}
@@ -66,7 +69,7 @@ func resourceComputeServerGroupV2Create(d *schema.ResourceData, meta interface{}
 
 func resourceComputeServerGroupV2Read(d *schema.ResourceData, meta interface{}) error {
 	config := meta.(*Config)
-	computeClient, err := config.computeV2Client(d.Get("region").(string))
+	computeClient, err := config.computeV2Client(GetRegion(d))
 	if err != nil {
 		return fmt.Errorf("Error creating OpenStack compute client: %s", err)
 	}
@@ -95,12 +98,14 @@ func resourceComputeServerGroupV2Read(d *schema.ResourceData, meta interface{}) 
 	}
 	d.Set("members", members)
 
+	d.Set("region", GetRegion(d))
+
 	return nil
 }
 
 func resourceComputeServerGroupV2Delete(d *schema.ResourceData, meta interface{}) error {
 	config := meta.(*Config)
-	computeClient, err := config.computeV2Client(d.Get("region").(string))
+	computeClient, err := config.computeV2Client(GetRegion(d))
 	if err != nil {
 		return fmt.Errorf("Error creating OpenStack compute client: %s", err)
 	}

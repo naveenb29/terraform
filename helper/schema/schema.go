@@ -52,6 +52,15 @@ type Schema struct {
 	Optional bool
 	Required bool
 
+	// If this is non-nil, the provided function will be used during diff
+	// of this field. If this is nil, a default diff for the type of the
+	// schema will be used.
+	//
+	// This allows comparison based on something other than primitive, list
+	// or map equality - for example SSH public keys may be considered
+	// equivalent regardless of trailing whitespace.
+	DiffSuppressFunc SchemaDiffSuppressFunc
+
 	// If this is non-nil, then this will be a default value that is used
 	// when this item is not set in the configuration/state.
 	//
@@ -99,7 +108,26 @@ type Schema struct {
 	// TypeList, and represents what the element type is. If it is *Schema,
 	// the element type is just a simple value. If it is *Resource, the
 	// element type is a complex structure, potentially with its own lifecycle.
-	Elem interface{}
+	//
+	// MaxItems defines a maximum amount of items that can exist within a
+	// TypeSet or TypeList. Specific use cases would be if a TypeSet is being
+	// used to wrap a complex structure, however more than one instance would
+	// cause instability.
+	//
+	// MinItems defines a minimum amount of items that can exist within a
+	// TypeSet or TypeList. Specific use cases would be if a TypeSet is being
+	// used to wrap a complex structure, however less than one instance would
+	// cause instability.
+	//
+	// PromoteSingle, if true, will allow single elements to be standalone
+	// and promote them to a list. For example "foo" would be promoted to
+	// ["foo"] automatically. This is primarily for legacy reasons and the
+	// ambiguity is not recommended for new usage. Promotion is only allowed
+	// for primitive element types.
+	Elem          interface{}
+	MaxItems      int
+	MinItems      int
+	PromoteSingle bool
 
 	// The following fields are only valid for a TypeSet type.
 	//
@@ -114,7 +142,10 @@ type Schema struct {
 	// NOTE: This currently does not work.
 	ComputedWhen []string
 
-	// ConflictsWith is a set of schema keys that conflict with this schema
+	// ConflictsWith is a set of schema keys that conflict with this schema.
+	// This will only check that they're set in the _config_. This will not
+	// raise an error for a malfunctioning resource that sets a conflicting
+	// key.
 	ConflictsWith []string
 
 	// When Deprecated is set, this attribute is deprecated.
@@ -139,7 +170,20 @@ type Schema struct {
 	//
 	// ValidateFunc currently only works for primitive types.
 	ValidateFunc SchemaValidateFunc
+
+	// Sensitive ensures that the attribute's value does not get displayed in
+	// logs or regular output. It should be used for passwords or other
+	// secret fields. Future versions of Terraform may encrypt these
+	// values.
+	Sensitive bool
 }
+
+// SchemaDiffSuppresFunc is a function which can be used to determine
+// whether a detected diff on a schema element is "valid" or not, and
+// suppress it from the plan if necessary.
+//
+// Return true if the diff should be suppressed, false to retain it.
+type SchemaDiffSuppressFunc func(k, old, new string, d *ResourceData) bool
 
 // SchemaDefaultFunc is a function called to return a default value for
 // a field.
@@ -237,6 +281,37 @@ func (s *Schema) finalizeDiff(
 		return d
 	}
 
+	if s.Type == TypeBool {
+		normalizeBoolString := func(s string) string {
+			switch s {
+			case "0":
+				return "false"
+			case "1":
+				return "true"
+			}
+			return s
+		}
+		d.Old = normalizeBoolString(d.Old)
+		d.New = normalizeBoolString(d.New)
+	}
+
+	if s.Computed && !d.NewRemoved && d.New == "" {
+		// Computed attribute without a new value set
+		d.NewComputed = true
+	}
+
+	if s.ForceNew {
+		// ForceNew, mark that this field is requiring new under the
+		// following conditions, explained below:
+		//
+		//   * Old != New - There is a change in value. This field
+		//       is therefore causing a new resource.
+		//
+		//   * NewComputed - This field is being computed, hence a
+		//       potential change in value, mark as causing a new resource.
+		d.RequiresNew = d.Old != d.New || d.NewComputed
+	}
+
 	if d.NewRemoved {
 		return d
 	}
@@ -254,9 +329,9 @@ func (s *Schema) finalizeDiff(
 		}
 	}
 
-	if s.ForceNew {
-		// Force new, set it to true in the diff
-		d.RequiresNew = true
+	if s.Sensitive {
+		// Set the Sensitive flag so output is hidden in the UI
+		d.Sensitive = true
 	}
 
 	return d
@@ -286,6 +361,11 @@ func (m schemaMap) Diff(
 	result := new(terraform.InstanceDiff)
 	result.Attributes = make(map[string]*terraform.ResourceAttrDiff)
 
+	// Make sure to mark if the resource is tainted
+	if s != nil {
+		result.DestroyTainted = s.Tainted
+	}
+
 	d := &ResourceData{
 		schema: m,
 		state:  s,
@@ -307,6 +387,9 @@ func (m schemaMap) Diff(
 		// Create the new diff
 		result2 := new(terraform.InstanceDiff)
 		result2.Attributes = make(map[string]*terraform.ResourceAttrDiff)
+
+		// Preserve the DestroyTainted flag
+		result2.DestroyTainted = result.DestroyTainted
 
 		// Reset the data to not contain state. We have to call init()
 		// again in order to reset the FieldReaders.
@@ -394,7 +477,9 @@ func (m schemaMap) Input(
 
 		// Skip things that don't require config, if that is even valid
 		// for a provider schema.
-		if !v.Required && !v.Optional {
+		// Required XOR Optional must always be true to validate, so we only
+		// need to check one.
+		if v.Optional {
 			continue
 		}
 
@@ -419,7 +504,7 @@ func (m schemaMap) Input(
 
 		var value interface{}
 		switch v.Type {
-		case TypeBool, TypeInt, TypeFloat, TypeSet:
+		case TypeBool, TypeInt, TypeFloat, TypeSet, TypeList:
 			continue
 		case TypeString:
 			value, err = m.inputString(input, k, v)
@@ -510,7 +595,7 @@ func (m schemaMap) InternalValidate(topSchemaMap schemaMap) error {
 					return fmt.Errorf("%s: ConflictsWith cannot contain Required attribute (%s)", k, key)
 				}
 
-				if target.Computed || len(target.ComputedWhen) > 0 {
+				if len(target.ComputedWhen) > 0 {
 					return fmt.Errorf("%s: ConflictsWith cannot contain Computed(When) attribute (%s)", k, key)
 				}
 			}
@@ -531,7 +616,7 @@ func (m schemaMap) InternalValidate(topSchemaMap schemaMap) error {
 
 			switch t := v.Elem.(type) {
 			case *Resource:
-				if err := t.InternalValidate(topSchemaMap); err != nil {
+				if err := t.InternalValidate(topSchemaMap, true); err != nil {
 					return err
 				}
 			case *Schema:
@@ -540,6 +625,10 @@ func (m schemaMap) InternalValidate(topSchemaMap schemaMap) error {
 					return fmt.Errorf(
 						"%s: Elem must have only Type set", k)
 				}
+			}
+		} else {
+			if v.MaxItems > 0 || v.MinItems > 0 {
+				return fmt.Errorf("%s: MaxItems and MinItems are only supported on lists or sets", k)
 			}
 		}
 
@@ -554,24 +643,51 @@ func (m schemaMap) InternalValidate(topSchemaMap schemaMap) error {
 	return nil
 }
 
+func (m schemaMap) markAsRemoved(k string, schema *Schema, diff *terraform.InstanceDiff) {
+	existingDiff, ok := diff.Attributes[k]
+	if ok {
+		existingDiff.NewRemoved = true
+		diff.Attributes[k] = schema.finalizeDiff(existingDiff)
+		return
+	}
+
+	diff.Attributes[k] = schema.finalizeDiff(&terraform.ResourceAttrDiff{
+		NewRemoved: true,
+	})
+}
+
 func (m schemaMap) diff(
 	k string,
 	schema *Schema,
 	diff *terraform.InstanceDiff,
 	d *ResourceData,
 	all bool) error {
+
+	unsupressedDiff := new(terraform.InstanceDiff)
+	unsupressedDiff.Attributes = make(map[string]*terraform.ResourceAttrDiff)
+
 	var err error
 	switch schema.Type {
 	case TypeBool, TypeInt, TypeFloat, TypeString:
-		err = m.diffString(k, schema, diff, d, all)
+		err = m.diffString(k, schema, unsupressedDiff, d, all)
 	case TypeList:
-		err = m.diffList(k, schema, diff, d, all)
+		err = m.diffList(k, schema, unsupressedDiff, d, all)
 	case TypeMap:
-		err = m.diffMap(k, schema, diff, d, all)
+		err = m.diffMap(k, schema, unsupressedDiff, d, all)
 	case TypeSet:
-		err = m.diffSet(k, schema, diff, d, all)
+		err = m.diffSet(k, schema, unsupressedDiff, d, all)
 	default:
 		err = fmt.Errorf("%s: unknown type %#v", k, schema.Type)
+	}
+
+	for attrK, attrV := range unsupressedDiff.Attributes {
+		if schema.DiffSuppressFunc != nil &&
+			attrV != nil &&
+			schema.DiffSuppressFunc(attrK, attrV.Old, attrV.New, d) {
+			continue
+		}
+
+		diff.Attributes[attrK] = attrV
 	}
 
 	return err
@@ -663,6 +779,7 @@ func (m schemaMap) diffList(
 
 	switch t := schema.Elem.(type) {
 	case *Resource:
+		countDiff, cOk := diff.GetAttribute(k + ".#")
 		// This is a complex resource
 		for i := 0; i < maxLen; i++ {
 			for k2, schema := range t.Schema {
@@ -670,6 +787,15 @@ func (m schemaMap) diffList(
 				err := m.diff(subK, schema, diff, d, all)
 				if err != nil {
 					return err
+				}
+
+				// If parent list is being removed
+				// remove all subfields which were missed by the diff func
+				// We process these separately because type-specific diff functions
+				// lack the context (hierarchy of fields)
+				subKeyIsCount := strings.HasSuffix(subK, ".#")
+				if cOk && countDiff.New == "0" && !subKeyIsCount {
+					m.markAsRemoved(subK, schema, diff)
 				}
 			}
 		}
@@ -717,8 +843,8 @@ func (m schemaMap) diffMap(
 	stateExists := o != nil
 
 	// Delete any count values, since we don't use those
-	delete(configMap, "#")
-	delete(stateMap, "#")
+	delete(configMap, "%")
+	delete(stateMap, "%")
 
 	// Check if the number of elements has changed.
 	oldLen, newLen := len(stateMap), len(configMap)
@@ -752,7 +878,7 @@ func (m schemaMap) diffMap(
 			oldStr = ""
 		}
 
-		diff.Attributes[k+".#"] = countSchema.finalizeDiff(
+		diff.Attributes[k+".%"] = countSchema.finalizeDiff(
 			&terraform.ResourceAttrDiff{
 				Old: oldStr,
 				New: newStr,
@@ -795,6 +921,7 @@ func (m schemaMap) diffSet(
 	diff *terraform.InstanceDiff,
 	d *ResourceData,
 	all bool) error {
+
 	o, n, _, computedSet := d.diffChange(k)
 	if computedSet {
 		n = nil
@@ -831,6 +958,13 @@ func (m schemaMap) diffSet(
 	oldStr := strconv.Itoa(oldLen)
 	newStr := strconv.Itoa(newLen)
 
+	// Build a schema for our count
+	countSchema := &Schema{
+		Type:     TypeInt,
+		Computed: schema.Computed,
+		ForceNew: schema.ForceNew,
+	}
+
 	// If the set computed then say that the # is computed
 	if computedSet || schema.Computed && !nSet {
 		// If # already exists, equals 0 and no new set is supplied, there
@@ -847,22 +981,16 @@ func (m schemaMap) diffSet(
 			countStr = ""
 		}
 
-		diff.Attributes[k+".#"] = &terraform.ResourceAttrDiff{
+		diff.Attributes[k+".#"] = countSchema.finalizeDiff(&terraform.ResourceAttrDiff{
 			Old:         countStr,
 			NewComputed: true,
-		}
+		})
 		return nil
 	}
 
 	// If the counts are not the same, then record that diff
 	changed := oldLen != newLen
 	if changed || all {
-		countSchema := &Schema{
-			Type:     TypeInt,
-			Computed: schema.Computed,
-			ForceNew: schema.ForceNew,
-		}
-
 		diff.Attributes[k+".#"] = countSchema.finalizeDiff(&terraform.ResourceAttrDiff{
 			Old: oldStr,
 			New: newStr,
@@ -878,6 +1006,7 @@ func (m schemaMap) diffSet(
 		for _, code := range list {
 			switch t := schema.Elem.(type) {
 			case *Resource:
+				countDiff, cOk := diff.GetAttribute(k + ".#")
 				// This is a complex resource
 				for k2, schema := range t.Schema {
 					subK := fmt.Sprintf("%s.%s.%s", k, code, k2)
@@ -885,7 +1014,17 @@ func (m schemaMap) diffSet(
 					if err != nil {
 						return err
 					}
+
+					// If parent set is being removed
+					// remove all subfields which were missed by the diff func
+					// We process these separately because type-specific diff functions
+					// lack the context (hierarchy of fields)
+					subKeyIsCount := strings.HasSuffix(subK, ".#")
+					if cOk && countDiff.New == "0" && !subKeyIsCount {
+						m.markAsRemoved(subK, schema, diff)
+					}
 				}
+
 			case *Schema:
 				// Copy the schema so that we can set Computed/ForceNew from
 				// the parent schema (the TypeSet).
@@ -916,7 +1055,7 @@ func (m schemaMap) diffString(
 	all bool) error {
 	var originalN interface{}
 	var os, ns string
-	o, n, _, _ := d.diffChange(k)
+	o, n, _, computed := d.diffChange(k)
 	if schema.StateFunc != nil && n != nil {
 		originalN = n
 		n = schema.StateFunc(n)
@@ -940,7 +1079,7 @@ func (m schemaMap) diffString(
 		}
 
 		// Otherwise, only continue if we're computed
-		if !schema.Computed {
+		if !schema.Computed && !computed {
 			return nil
 		}
 	}
@@ -954,10 +1093,11 @@ func (m schemaMap) diffString(
 	}
 
 	diff.Attributes[k] = schema.finalizeDiff(&terraform.ResourceAttrDiff{
-		Old:        os,
-		New:        ns,
-		NewExtra:   originalN,
-		NewRemoved: removed,
+		Old:         os,
+		New:         ns,
+		NewExtra:    originalN,
+		NewRemoved:  removed,
+		NewComputed: computed,
 	})
 
 	return nil
@@ -1044,9 +1184,28 @@ func (m schemaMap) validateList(
 	// We use reflection to verify the slice because you can't
 	// case to []interface{} unless the slice is exactly that type.
 	rawV := reflect.ValueOf(raw)
+
+	// If we support promotion and the raw value isn't a slice, wrap
+	// it in []interface{} and check again.
+	if schema.PromoteSingle && rawV.Kind() != reflect.Slice {
+		raw = []interface{}{raw}
+		rawV = reflect.ValueOf(raw)
+	}
+
 	if rawV.Kind() != reflect.Slice {
 		return nil, []error{fmt.Errorf(
 			"%s: should be a list", k)}
+	}
+
+	// Validate length
+	if schema.MaxItems > 0 && rawV.Len() > schema.MaxItems {
+		return nil, []error{fmt.Errorf(
+			"%s: attribute supports %d item maximum, config has %d declared", k, schema.MaxItems, rawV.Len())}
+	}
+
+	if schema.MinItems > 0 && rawV.Len() < schema.MinItems {
+		return nil, []error{fmt.Errorf(
+			"%s: attribute supports %d item as a minimum, config has %d declared", k, schema.MinItems, rawV.Len())}
 	}
 
 	// Now build the []interface{}
@@ -1090,15 +1249,30 @@ func (m schemaMap) validateMap(
 	// case to []interface{} unless the slice is exactly that type.
 	rawV := reflect.ValueOf(raw)
 	switch rawV.Kind() {
+	case reflect.String:
+		// If raw and reified are equal, this is a string and should
+		// be rejected.
+		reified, reifiedOk := c.Get(k)
+		if reifiedOk && raw == reified && !c.IsComputed(k) {
+			return nil, []error{fmt.Errorf("%s: should be a map", k)}
+		}
+		// Otherwise it's likely raw is an interpolation.
+		return nil, nil
 	case reflect.Map:
 	case reflect.Slice:
 	default:
-		return nil, []error{fmt.Errorf(
-			"%s: should be a map", k)}
+		return nil, []error{fmt.Errorf("%s: should be a map", k)}
 	}
 
-	// If it is not a slice, it is valid
+	// If it is not a slice, validate directly
 	if rawV.Kind() != reflect.Slice {
+		mapIface := rawV.Interface()
+		if _, errs := validateMapValues(k, mapIface.(map[string]interface{}), schema); len(errs) > 0 {
+			return nil, errs
+		}
+		if schema.ValidateFunc != nil {
+			return schema.ValidateFunc(mapIface, k)
+		}
 		return nil, nil
 	}
 
@@ -1114,6 +1288,10 @@ func (m schemaMap) validateMap(
 			return nil, []error{fmt.Errorf(
 				"%s: should be a map", k)}
 		}
+		mapIface := v.Interface()
+		if _, errs := validateMapValues(k, mapIface.(map[string]interface{}), schema); len(errs) > 0 {
+			return nil, errs
+		}
 	}
 
 	if schema.ValidateFunc != nil {
@@ -1128,6 +1306,67 @@ func (m schemaMap) validateMap(
 	}
 
 	return nil, nil
+}
+
+func validateMapValues(k string, m map[string]interface{}, schema *Schema) ([]string, []error) {
+	for key, raw := range m {
+		valueType, err := getValueType(k, schema)
+		if err != nil {
+			return nil, []error{err}
+		}
+
+		switch valueType {
+		case TypeBool:
+			var n bool
+			if err := mapstructure.WeakDecode(raw, &n); err != nil {
+				return nil, []error{fmt.Errorf("%s (%s): %s", k, key, err)}
+			}
+		case TypeInt:
+			var n int
+			if err := mapstructure.WeakDecode(raw, &n); err != nil {
+				return nil, []error{fmt.Errorf("%s (%s): %s", k, key, err)}
+			}
+		case TypeFloat:
+			var n float64
+			if err := mapstructure.WeakDecode(raw, &n); err != nil {
+				return nil, []error{fmt.Errorf("%s (%s): %s", k, key, err)}
+			}
+		case TypeString:
+			var n string
+			if err := mapstructure.WeakDecode(raw, &n); err != nil {
+				return nil, []error{fmt.Errorf("%s (%s): %s", k, key, err)}
+			}
+		default:
+			panic(fmt.Sprintf("Unknown validation type: %#v", schema.Type))
+		}
+	}
+	return nil, nil
+}
+
+func getValueType(k string, schema *Schema) (ValueType, error) {
+	if schema.Elem == nil {
+		return TypeString, nil
+	}
+	if vt, ok := schema.Elem.(ValueType); ok {
+		return vt, nil
+	}
+
+	if s, ok := schema.Elem.(*Schema); ok {
+		if s.Elem == nil {
+			return TypeString, nil
+		}
+		if vt, ok := s.Elem.(ValueType); ok {
+			return vt, nil
+		}
+	}
+
+	if _, ok := schema.Elem.(*Resource); ok {
+		// TODO: We don't actually support this (yet)
+		// but silently pass the validation, until we decide
+		// how to handle nested structures in maps
+		return TypeString, nil
+	}
+	return 0, fmt.Errorf("%s: unexpected map value type: %#v", k, schema.Elem)
 }
 
 func (m schemaMap) validateObject(
@@ -1162,6 +1401,9 @@ func (m schemaMap) validateObject(
 	if m, ok := raw.(map[string]interface{}); ok {
 		for subk, _ := range m {
 			if _, ok := schema[subk]; !ok {
+				if subk == TimeoutsConfigKey {
+					continue
+				}
 				es = append(es, fmt.Errorf(
 					"%s: invalid or unknown key: %s", k, subk))
 			}
@@ -1204,28 +1446,28 @@ func (m schemaMap) validatePrimitive(
 		// Verify that we can parse this as the correct type
 		var n bool
 		if err := mapstructure.WeakDecode(raw, &n); err != nil {
-			return nil, []error{err}
+			return nil, []error{fmt.Errorf("%s: %s", k, err)}
 		}
 		decoded = n
 	case TypeInt:
 		// Verify that we can parse this as an int
 		var n int
 		if err := mapstructure.WeakDecode(raw, &n); err != nil {
-			return nil, []error{err}
+			return nil, []error{fmt.Errorf("%s: %s", k, err)}
 		}
 		decoded = n
 	case TypeFloat:
 		// Verify that we can parse this as an int
 		var n float64
 		if err := mapstructure.WeakDecode(raw, &n); err != nil {
-			return nil, []error{err}
+			return nil, []error{fmt.Errorf("%s: %s", k, err)}
 		}
 		decoded = n
 	case TypeString:
 		// Verify that we can parse this as a string
 		var n string
 		if err := mapstructure.WeakDecode(raw, &n); err != nil {
-			return nil, []error{err}
+			return nil, []error{fmt.Errorf("%s: %s", k, err)}
 		}
 		decoded = n
 	default:

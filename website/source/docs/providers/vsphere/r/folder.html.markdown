@@ -6,7 +6,7 @@ description: |-
   Provides a VMware vSphere virtual machine folder resource. This can be used to create and delete virtual machine folders.
 ---
 
-# vsphere\_virtual\_machine
+# vsphere\_folder
 
 Provides a VMware vSphere virtual machine folder resource. This can be used to create and delete virtual machine folders.
 
@@ -14,7 +14,7 @@ Provides a VMware vSphere virtual machine folder resource. This can be used to c
 
 ```
 resource "vsphere_folder" "web" {
-  path   = "terraform_web_folder"
+  path = "terraform_web_folder"
 }
 ```
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/errwrap"
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/helper/schema"
 
@@ -34,43 +35,48 @@ func resourceAwsDynamoDbTable() *schema.Resource {
 		Read:   resourceAwsDynamoDbTableRead,
 		Update: resourceAwsDynamoDbTableUpdate,
 		Delete: resourceAwsDynamoDbTableDelete,
+		Importer: &schema.ResourceImporter{
+			State: schema.ImportStatePassthrough,
+		},
 
 		Schema: map[string]*schema.Schema{
-			"arn": &schema.Schema{
+			"arn": {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
-			"name": &schema.Schema{
+			"name": {
 				Type:     schema.TypeString,
 				Required: true,
 				ForceNew: true,
 			},
-			"hash_key": &schema.Schema{
+			"hash_key": {
 				Type:     schema.TypeString,
 				Required: true,
+				ForceNew: true,
 			},
-			"range_key": &schema.Schema{
+			"range_key": {
 				Type:     schema.TypeString,
 				Optional: true,
+				ForceNew: true,
 			},
-			"write_capacity": &schema.Schema{
+			"write_capacity": {
 				Type:     schema.TypeInt,
 				Required: true,
 			},
-			"read_capacity": &schema.Schema{
+			"read_capacity": {
 				Type:     schema.TypeInt,
 				Required: true,
 			},
-			"attribute": &schema.Schema{
+			"attribute": {
 				Type:     schema.TypeSet,
 				Required: true,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
-						"name": &schema.Schema{
+						"name": {
 							Type:     schema.TypeString,
 							Required: true,
 						},
-						"type": &schema.Schema{
+						"type": {
 							Type:     schema.TypeString,
 							Required: true,
 						},
@@ -83,24 +89,25 @@ func resourceAwsDynamoDbTable() *schema.Resource {
 					return hashcode.String(buf.String())
 				},
 			},
-			"local_secondary_index": &schema.Schema{
+			"local_secondary_index": {
 				Type:     schema.TypeSet,
 				Optional: true,
+				ForceNew: true,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
-						"name": &schema.Schema{
+						"name": {
 							Type:     schema.TypeString,
 							Required: true,
 						},
-						"range_key": &schema.Schema{
+						"range_key": {
 							Type:     schema.TypeString,
 							Required: true,
 						},
-						"projection_type": &schema.Schema{
+						"projection_type": {
 							Type:     schema.TypeString,
 							Required: true,
 						},
-						"non_key_attributes": &schema.Schema{
+						"non_key_attributes": {
 							Type:     schema.TypeList,
 							Optional: true,
 							Elem:     &schema.Schema{Type: schema.TypeString},
@@ -114,36 +121,36 @@ func resourceAwsDynamoDbTable() *schema.Resource {
 					return hashcode.String(buf.String())
 				},
 			},
-			"global_secondary_index": &schema.Schema{
+			"global_secondary_index": {
 				Type:     schema.TypeSet,
 				Optional: true,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
-						"name": &schema.Schema{
+						"name": {
 							Type:     schema.TypeString,
 							Required: true,
 						},
-						"write_capacity": &schema.Schema{
+						"write_capacity": {
 							Type:     schema.TypeInt,
 							Required: true,
 						},
-						"read_capacity": &schema.Schema{
+						"read_capacity": {
 							Type:     schema.TypeInt,
 							Required: true,
 						},
-						"hash_key": &schema.Schema{
+						"hash_key": {
 							Type:     schema.TypeString,
 							Required: true,
 						},
-						"range_key": &schema.Schema{
+						"range_key": {
 							Type:     schema.TypeString,
 							Optional: true,
 						},
-						"projection_type": &schema.Schema{
+						"projection_type": {
 							Type:     schema.TypeString,
 							Required: true,
 						},
-						"non_key_attributes": &schema.Schema{
+						"non_key_attributes": {
 							Type:     schema.TypeList,
 							Optional: true,
 							Elem:     &schema.Schema{Type: schema.TypeString},
@@ -160,12 +167,12 @@ func resourceAwsDynamoDbTable() *schema.Resource {
 					return hashcode.String(buf.String())
 				},
 			},
-			"stream_enabled": &schema.Schema{
+			"stream_enabled": {
 				Type:     schema.TypeBool,
 				Optional: true,
 				Computed: true,
 			},
-			"stream_view_type": &schema.Schema{
+			"stream_view_type": {
 				Type:     schema.TypeString,
 				Optional: true,
 				Computed: true,
@@ -175,6 +182,11 @@ func resourceAwsDynamoDbTable() *schema.Resource {
 				},
 				ValidateFunc: validateStreamViewType,
 			},
+			"stream_arn": {
+				Type:     schema.TypeString,
+				Computed: true,
+			},
+			"tags": tagsSchema(),
 		},
 	}
 }
@@ -193,7 +205,7 @@ func resourceAwsDynamoDbTableCreate(d *schema.ResourceData, meta interface{}) er
 
 	hash_key_name := d.Get("hash_key").(string)
 	keyschema := []*dynamodb.KeySchemaElement{
-		&dynamodb.KeySchemaElement{
+		{
 			AttributeName: aws.String(hash_key_name),
 			KeyType:       aws.String("HASH"),
 		},
@@ -228,7 +240,7 @@ func resourceAwsDynamoDbTableCreate(d *schema.ResourceData, meta interface{}) er
 	}
 
 	if lsidata, ok := d.GetOk("local_secondary_index"); ok {
-		fmt.Printf("[DEBUG] Adding LSI data to the table")
+		log.Printf("[DEBUG] Adding LSI data to the table")
 
 		lsiSet := lsidata.(*schema.Set)
 		localSecondaryIndexes := []*dynamodb.LocalSecondaryIndex{}
@@ -250,11 +262,11 @@ func resourceAwsDynamoDbTableCreate(d *schema.ResourceData, meta interface{}) er
 			localSecondaryIndexes = append(localSecondaryIndexes, &dynamodb.LocalSecondaryIndex{
 				IndexName: aws.String(lsi["name"].(string)),
 				KeySchema: []*dynamodb.KeySchemaElement{
-					&dynamodb.KeySchemaElement{
+					{
 						AttributeName: aws.String(hash_key_name),
 						KeyType:       aws.String("HASH"),
 					},
-					&dynamodb.KeySchemaElement{
+					{
 						AttributeName: aws.String(lsi["range_key"].(string)),
 						KeyType:       aws.String("RANGE"),
 					},
@@ -265,7 +277,7 @@ func resourceAwsDynamoDbTableCreate(d *schema.ResourceData, meta interface{}) er
 
 		req.LocalSecondaryIndexes = localSecondaryIndexes
 
-		fmt.Printf("[DEBUG] Added %d LSI definitions", len(localSecondaryIndexes))
+		log.Printf("[DEBUG] Added %d LSI definitions", len(localSecondaryIndexes))
 	}
 
 	if gsidata, ok := d.GetOk("global_secondary_index"); ok {
@@ -287,8 +299,10 @@ func resourceAwsDynamoDbTableCreate(d *schema.ResourceData, meta interface{}) er
 			StreamViewType: aws.String(d.Get("stream_view_type").(string)),
 		}
 
-		fmt.Printf("[DEBUG] Adding StreamSpecifications to the table")
+		log.Printf("[DEBUG] Adding StreamSpecifications to the table")
 	}
+
+	_, tagsOk := d.GetOk("tags")
 
 	attemptCount := 1
 	for attemptCount <= DYNAMODB_MAX_THROTTLE_RETRIES {
@@ -314,10 +328,16 @@ func resourceAwsDynamoDbTableCreate(d *schema.ResourceData, meta interface{}) er
 		} else {
 			// No error, set ID and return
 			d.SetId(*output.TableDescription.TableName)
-			if err := d.Set("arn", *output.TableDescription.TableArn); err != nil {
+			tableArn := *output.TableDescription.TableArn
+			if err := d.Set("arn", tableArn); err != nil {
 				return err
 			}
-
+			if tagsOk {
+				log.Printf("[DEBUG] Setting DynamoDB Tags on arn: %s", tableArn)
+				if err := createTableTags(d, meta); err != nil {
+					return err
+				}
+			}
 			return resourceAwsDynamoDbTableRead(d, meta)
 		}
 	}
@@ -332,19 +352,8 @@ func resourceAwsDynamoDbTableUpdate(d *schema.ResourceData, meta interface{}) er
 	dynamodbconn := meta.(*AWSClient).dynamodbconn
 
 	// Ensure table is active before trying to update
-	waitForTableToBeActive(d.Id(), meta)
-
-	// LSI can only be done at create-time, abort if it's been changed
-	if d.HasChange("local_secondary_index") {
-		return fmt.Errorf("Local secondary indexes can only be built at creation, you cannot update them!")
-	}
-
-	if d.HasChange("hash_key") {
-		return fmt.Errorf("Hash key can only be specified at creation, you cannot modify it.")
-	}
-
-	if d.HasChange("range_key") {
-		return fmt.Errorf("Range key can only be specified at creation, you cannot modify it.")
+	if err := waitForTableToBeActive(d.Id(), meta); err != nil {
+		return errwrap.Wrapf("Error waiting for Dynamo DB Table update: {{err}}", err)
 	}
 
 	if d.HasChange("read_capacity") || d.HasChange("write_capacity") {
@@ -364,7 +373,9 @@ func resourceAwsDynamoDbTableUpdate(d *schema.ResourceData, meta interface{}) er
 			return err
 		}
 
-		waitForTableToBeActive(d.Id(), meta)
+		if err := waitForTableToBeActive(d.Id(), meta); err != nil {
+			return errwrap.Wrapf("Error waiting for Dynamo DB Table update: {{err}}", err)
+		}
 	}
 
 	if d.HasChange("stream_enabled") || d.HasChange("stream_view_type") {
@@ -383,7 +394,9 @@ func resourceAwsDynamoDbTableUpdate(d *schema.ResourceData, meta interface{}) er
 			return err
 		}
 
-		waitForTableToBeActive(d.Id(), meta)
+		if err := waitForTableToBeActive(d.Id(), meta); err != nil {
+			return errwrap.Wrapf("Error waiting for Dynamo DB Table update: {{err}}", err)
+		}
 	}
 
 	if d.HasChange("global_secondary_index") {
@@ -465,8 +478,13 @@ func resourceAwsDynamoDbTableUpdate(d *schema.ResourceData, meta interface{}) er
 					return err
 				}
 
-				waitForTableToBeActive(d.Id(), meta)
-				waitForGSIToBeActive(d.Id(), *gsi.IndexName, meta)
+				if err := waitForTableToBeActive(d.Id(), meta); err != nil {
+					return errwrap.Wrapf("Error waiting for Dynamo DB Table update: {{err}}", err)
+				}
+
+				if err := waitForGSIToBeActive(d.Id(), *gsi.IndexName, meta); err != nil {
+					return errwrap.Wrapf("Error waiting for Dynamo DB GSIT to be active: {{err}}", err)
+				}
 
 			}
 		}
@@ -491,7 +509,9 @@ func resourceAwsDynamoDbTableUpdate(d *schema.ResourceData, meta interface{}) er
 					return err
 				}
 
-				waitForTableToBeActive(d.Id(), meta)
+				if err := waitForTableToBeActive(d.Id(), meta); err != nil {
+					return errwrap.Wrapf("Error waiting for Dynamo DB Table update: {{err}}", err)
+				}
 			}
 		}
 	}
@@ -570,6 +590,11 @@ func resourceAwsDynamoDbTableUpdate(d *schema.ResourceData, meta interface{}) er
 
 	}
 
+	// Update tags
+	if err := setTagsDynamoDb(dynamodbconn, d); err != nil {
+		return err
+	}
+
 	return resourceAwsDynamoDbTableRead(d, meta)
 }
 
@@ -583,6 +608,11 @@ func resourceAwsDynamoDbTableRead(d *schema.ResourceData, meta interface{}) erro
 	result, err := dynamodbconn.DescribeTable(req)
 
 	if err != nil {
+		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == "ResourceNotFoundException" {
+			log.Printf("[WARN] Dynamodb Table (%s) not found, error code (404)", d.Id())
+			d.SetId("")
+			return nil
+		}
 		return err
 	}
 
@@ -602,6 +632,44 @@ func resourceAwsDynamoDbTableRead(d *schema.ResourceData, meta interface{}) erro
 	}
 
 	d.Set("attribute", attributes)
+	d.Set("name", table.TableName)
+
+	for _, attribute := range table.KeySchema {
+		if *attribute.KeyType == "HASH" {
+			d.Set("hash_key", attribute.AttributeName)
+		}
+
+		if *attribute.KeyType == "RANGE" {
+			d.Set("range_key", attribute.AttributeName)
+		}
+	}
+
+	lsiList := make([]map[string]interface{}, 0, len(table.LocalSecondaryIndexes))
+	for _, lsiObject := range table.LocalSecondaryIndexes {
+		lsi := map[string]interface{}{
+			"name":            *lsiObject.IndexName,
+			"projection_type": *lsiObject.Projection.ProjectionType,
+		}
+
+		for _, attribute := range lsiObject.KeySchema {
+
+			if *attribute.KeyType == "RANGE" {
+				lsi["range_key"] = *attribute.AttributeName
+			}
+		}
+		nkaList := make([]string, len(lsiObject.Projection.NonKeyAttributes))
+		for _, nka := range lsiObject.Projection.NonKeyAttributes {
+			nkaList = append(nkaList, *nka)
+		}
+		lsi["non_key_attributes"] = nkaList
+
+		lsiList = append(lsiList, lsi)
+	}
+
+	err = d.Set("local_secondary_index", lsiList)
+	if err != nil {
+		return err
+	}
 
 	gsiList := make([]map[string]interface{}, 0, len(table.GlobalSecondaryIndexes))
 	for _, gsiObject := range table.GlobalSecondaryIndexes {
@@ -636,6 +704,7 @@ func resourceAwsDynamoDbTableRead(d *schema.ResourceData, meta interface{}) erro
 	if table.StreamSpecification != nil {
 		d.Set("stream_view_type", table.StreamSpecification.StreamViewType)
 		d.Set("stream_enabled", table.StreamSpecification.StreamEnabled)
+		d.Set("stream_arn", table.LatestStreamArn)
 	}
 
 	err = d.Set("global_secondary_index", gsiList)
@@ -645,13 +714,23 @@ func resourceAwsDynamoDbTableRead(d *schema.ResourceData, meta interface{}) erro
 
 	d.Set("arn", table.TableArn)
 
+	tags, err := readTableTags(d, meta)
+	if err != nil {
+		return err
+	}
+	if len(tags) != 0 {
+		d.Set("tags", tags)
+	}
+
 	return nil
 }
 
 func resourceAwsDynamoDbTableDelete(d *schema.ResourceData, meta interface{}) error {
 	dynamodbconn := meta.(*AWSClient).dynamodbconn
 
-	waitForTableToBeActive(d.Id(), meta)
+	if err := waitForTableToBeActive(d.Id(), meta); err != nil {
+		return errwrap.Wrapf("Error waiting for Dynamo DB Table update: {{err}}", err)
+	}
 
 	log.Printf("[DEBUG] DynamoDB delete table: %s", d.Id())
 
@@ -666,25 +745,25 @@ func resourceAwsDynamoDbTableDelete(d *schema.ResourceData, meta interface{}) er
 		TableName: aws.String(d.Id()),
 	}
 
-	err = resource.Retry(10*time.Minute, func() error {
+	err = resource.Retry(10*time.Minute, func() *resource.RetryError {
 		t, err := dynamodbconn.DescribeTable(params)
 		if err != nil {
 			if awserr, ok := err.(awserr.Error); ok && awserr.Code() == "ResourceNotFoundException" {
 				return nil
 			}
 			// Didn't recognize the error, so shouldn't retry.
-			return resource.RetryError{Err: err}
+			return resource.NonRetryableError(err)
 		}
 
 		if t != nil {
 			if t.Table.TableStatus != nil && strings.ToLower(*t.Table.TableStatus) == "deleting" {
 				log.Printf("[DEBUG] AWS Dynamo DB table (%s) is still deleting", d.Id())
-				return fmt.Errorf("still deleting")
+				return resource.RetryableError(fmt.Errorf("still deleting"))
 			}
 		}
 
 		// we should be not found or deleting, so error here
-		return resource.RetryError{Err: fmt.Errorf("[ERR] Error deleting Dynamo DB table, unexpected state: %s", t)}
+		return resource.NonRetryableError(err)
 	})
 
 	// check error from retry
@@ -713,7 +792,7 @@ func createGSIFromData(data *map[string]interface{}) dynamodb.GlobalSecondaryInd
 	readCapacity := (*data)["read_capacity"].(int)
 
 	key_schema := []*dynamodb.KeySchemaElement{
-		&dynamodb.KeySchemaElement{
+		{
 			AttributeName: aws.String((*data)["hash_key"].(string)),
 			KeyType:       aws.String("HASH"),
 		},
@@ -832,4 +911,44 @@ func waitForTableToBeActive(tableName string, meta interface{}) error {
 
 	return nil
 
+}
+
+func createTableTags(d *schema.ResourceData, meta interface{}) error {
+	// DynamoDB Table has to be in the ACTIVE state in order to tag the resource
+	if err := waitForTableToBeActive(d.Id(), meta); err != nil {
+		return err
+	}
+	tags := d.Get("tags").(map[string]interface{})
+	arn := d.Get("arn").(string)
+	dynamodbconn := meta.(*AWSClient).dynamodbconn
+	req := &dynamodb.TagResourceInput{
+		ResourceArn: aws.String(arn),
+		Tags:        tagsFromMapDynamoDb(tags),
+	}
+	_, err := dynamodbconn.TagResource(req)
+	if err != nil {
+		return fmt.Errorf("Error tagging dynamodb resource: %s", err)
+	}
+	return nil
+}
+
+func readTableTags(d *schema.ResourceData, meta interface{}) (map[string]string, error) {
+	if err := waitForTableToBeActive(d.Id(), meta); err != nil {
+		return nil, err
+	}
+	arn := d.Get("arn").(string)
+	//result := make(map[string]string)
+
+	dynamodbconn := meta.(*AWSClient).dynamodbconn
+	req := &dynamodb.ListTagsOfResourceInput{
+		ResourceArn: aws.String(arn),
+	}
+
+	output, err := dynamodbconn.ListTagsOfResource(req)
+	if err != nil {
+		return nil, fmt.Errorf("Error reading tags from dynamodb resource: %s", err)
+	}
+	result := tagsToMapDynamoDb(output.Tags)
+	// TODO Read NextToken if avail
+	return result, nil
 }

@@ -79,6 +79,5 @@ func testAccCheckDnsManagedZoneExists(n string, zone *dns.ManagedZone) resource.
 var testAccDnsManagedZone_basic = fmt.Sprintf(`
 resource "google_dns_managed_zone" "foobar" {
 	name = "mzone-test-%s"
-	dns_name = "terraform.test."
-	description = "Test Description"
+	dns_name = "hashicorptest.com."
 }`, acctest.RandString(10))

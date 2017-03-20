@@ -14,12 +14,12 @@ Registers an existing template into the CloudStack cloud.
 
 ```
 resource "cloudstack_template" "centos64" {
-  name = "CentOS 6.4 x64"
-  format= "VHD"
+  name       = "CentOS 6.4 x64"
+  format     = "VHD"
   hypervisor = "XenServer"
-  os_type = "CentOS 6.4 (64bit)"
-  url = "http://someurl.com/template.vhd"
-  zone = "zone-1"
+  os_type    = "CentOS 6.4 (64bit)"
+  url        = "http://someurl.com/template.vhd"
+  zone       = "zone-1"
 }
 ```
 
@@ -31,8 +31,8 @@ The following arguments are supported:
 
 * `display_text` - (Optional) The display name of the template.
 
-* `format` - (Required) The format of the template. Valid values are "QCOW2",
-    "RAW", and "VHD".
+* `format` - (Required) The format of the template. Valid values are `QCOW2`,
+    `RAW`, and `VHD`.
 
 * `hypervisor` - (Required) The target hypervisor for the template. Changing
     this forces a new resource to be created.
@@ -43,11 +43,14 @@ The following arguments are supported:
 * `url` - (Required) The URL of where the template is hosted. Changing this
     forces a new resource to be created.
 
+* `project` - (Optional) The name or ID of the project to create this template for.
+    Changing this forces a new resource to be created.
+
 * `zone` - (Required) The name or ID of the zone where this template will be created.
     Changing this forces a new resource to be created.
 
 * `is_dynamically_scalable` - (Optional) Set to indicate if the template contains
-    tools to support dynamic scaling of VM cpu/memory.
+    tools to support dynamic scaling of VM cpu/memory (defaults false)
 
 * `is_extractable` - (Optional) Set to indicate if the template is extractable
     (defaults false)

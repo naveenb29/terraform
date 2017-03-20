@@ -20,95 +20,104 @@ func resourceAwsOpsworksStack() *schema.Resource {
 		Read:   resourceAwsOpsworksStackRead,
 		Update: resourceAwsOpsworksStackUpdate,
 		Delete: resourceAwsOpsworksStackDelete,
+		Importer: &schema.ResourceImporter{
+			State: schema.ImportStatePassthrough,
+		},
 
 		Schema: map[string]*schema.Schema{
-			"id": &schema.Schema{
+			"agent_version": {
+				Type:     schema.TypeString,
+				Optional: true,
+				Computed: true,
+			},
+
+			"id": {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
 
-			"name": &schema.Schema{
+			"name": {
 				Type:     schema.TypeString,
 				Required: true,
 			},
 
-			"region": &schema.Schema{
+			"region": {
 				Type:     schema.TypeString,
 				ForceNew: true,
 				Required: true,
 			},
 
-			"service_role_arn": &schema.Schema{
+			"service_role_arn": {
 				Type:     schema.TypeString,
 				Required: true,
 			},
 
-			"default_instance_profile_arn": &schema.Schema{
+			"default_instance_profile_arn": {
 				Type:     schema.TypeString,
 				Required: true,
 			},
 
-			"color": &schema.Schema{
+			"color": {
 				Type:     schema.TypeString,
 				Optional: true,
 			},
 
-			"configuration_manager_name": &schema.Schema{
+			"configuration_manager_name": {
 				Type:     schema.TypeString,
 				Optional: true,
 				Default:  "Chef",
 			},
 
-			"configuration_manager_version": &schema.Schema{
+			"configuration_manager_version": {
 				Type:     schema.TypeString,
 				Optional: true,
 				Default:  "11.4",
 			},
 
-			"manage_berkshelf": &schema.Schema{
+			"manage_berkshelf": {
 				Type:     schema.TypeBool,
 				Optional: true,
 				Default:  false,
 			},
 
-			"berkshelf_version": &schema.Schema{
+			"berkshelf_version": {
 				Type:     schema.TypeString,
 				Optional: true,
 				Default:  "3.2.0",
 			},
 
-			"custom_cookbooks_source": &schema.Schema{
+			"custom_cookbooks_source": {
 				Type:     schema.TypeList,
 				Optional: true,
 				Computed: true,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
-						"type": &schema.Schema{
+						"type": {
 							Type:     schema.TypeString,
 							Required: true,
 						},
 
-						"url": &schema.Schema{
+						"url": {
 							Type:     schema.TypeString,
 							Required: true,
 						},
 
-						"username": &schema.Schema{
+						"username": {
 							Type:     schema.TypeString,
 							Optional: true,
 						},
 
-						"password": &schema.Schema{
+						"password": {
 							Type:     schema.TypeString,
 							Optional: true,
 						},
 
-						"revision": &schema.Schema{
+						"revision": {
 							Type:     schema.TypeString,
 							Optional: true,
 						},
 
-						"ssh_key": &schema.Schema{
+						"ssh_key": {
 							Type:     schema.TypeString,
 							Optional: true,
 						},
@@ -116,58 +125,58 @@ func resourceAwsOpsworksStack() *schema.Resource {
 				},
 			},
 
-			"custom_json": &schema.Schema{
+			"custom_json": {
 				Type:     schema.TypeString,
 				Optional: true,
 			},
 
-			"default_availability_zone": &schema.Schema{
+			"default_availability_zone": {
 				Type:     schema.TypeString,
 				Optional: true,
 				Computed: true,
 			},
 
-			"default_os": &schema.Schema{
+			"default_os": {
 				Type:     schema.TypeString,
 				Optional: true,
 				Default:  "Ubuntu 12.04 LTS",
 			},
 
-			"default_root_device_type": &schema.Schema{
+			"default_root_device_type": {
 				Type:     schema.TypeString,
 				Optional: true,
 				Default:  "instance-store",
 			},
 
-			"default_ssh_key_name": &schema.Schema{
+			"default_ssh_key_name": {
 				Type:     schema.TypeString,
 				Optional: true,
 			},
 
-			"default_subnet_id": &schema.Schema{
+			"default_subnet_id": {
 				Type:     schema.TypeString,
 				Optional: true,
 			},
 
-			"hostname_theme": &schema.Schema{
+			"hostname_theme": {
 				Type:     schema.TypeString,
 				Optional: true,
 				Default:  "Layer_Dependent",
 			},
 
-			"use_custom_cookbooks": &schema.Schema{
+			"use_custom_cookbooks": {
 				Type:     schema.TypeBool,
 				Optional: true,
 				Default:  false,
 			},
 
-			"use_opsworks_security_groups": &schema.Schema{
+			"use_opsworks_security_groups": {
 				Type:     schema.TypeBool,
 				Optional: true,
 				Default:  true,
 			},
 
-			"vpc_id": &schema.Schema{
+			"vpc_id": {
 				Type:     schema.TypeString,
 				ForceNew: true,
 				Optional: true,
@@ -214,7 +223,7 @@ func resourceAwsOpsworksStackCustomCookbooksSource(d *schema.ResourceData) *opsw
 
 func resourceAwsOpsworksSetStackCustomCookbooksSource(d *schema.ResourceData, v *opsworks.Source) {
 	nv := make([]interface{}, 0, 1)
-	if v != nil {
+	if v != nil && v.Type != nil && *v.Type != "" {
 		m := make(map[string]interface{})
 		if v.Type != nil {
 			m["type"] = *v.Type
@@ -225,12 +234,12 @@ func resourceAwsOpsworksSetStackCustomCookbooksSource(d *schema.ResourceData, v 
 		if v.Username != nil {
 			m["username"] = *v.Username
 		}
-		if v.Password != nil {
-			m["password"] = *v.Password
-		}
 		if v.Revision != nil {
 			m["revision"] = *v.Revision
 		}
+		// v.Password will, on read, contain the placeholder string
+		// "*****FILTERED*****", so we ignore it on read and let persist
+		// the value already in the state.
 		nv = append(nv, m)
 	}
 
@@ -265,6 +274,7 @@ func resourceAwsOpsworksStackRead(d *schema.ResourceData, meta interface{}) erro
 	}
 
 	stack := resp.Stacks[0]
+	d.Set("agent_version", stack.AgentVersion)
 	d.Set("name", stack.Name)
 	d.Set("region", stack.Region)
 	d.Set("default_instance_profile_arn", stack.DefaultInstanceProfileArn)
@@ -276,6 +286,9 @@ func resourceAwsOpsworksStackRead(d *schema.ResourceData, meta interface{}) erro
 	d.Set("default_subnet_id", stack.DefaultSubnetId)
 	d.Set("hostname_theme", stack.HostnameTheme)
 	d.Set("use_custom_cookbooks", stack.UseCustomCookbooks)
+	if stack.CustomJson != nil {
+		d.Set("custom_json", stack.CustomJson)
+	}
 	d.Set("use_opsworks_security_groups", stack.UseOpsworksSecurityGroups)
 	d.Set("vpc_id", stack.VpcId)
 	if color, ok := stack.Attributes["Color"]; ok {
@@ -307,7 +320,12 @@ func resourceAwsOpsworksStackCreate(d *schema.ResourceData, meta interface{}) er
 		Name:                      aws.String(d.Get("name").(string)),
 		Region:                    aws.String(d.Get("region").(string)),
 		ServiceRoleArn:            aws.String(d.Get("service_role_arn").(string)),
+		DefaultOs:                 aws.String(d.Get("default_os").(string)),
 		UseOpsworksSecurityGroups: aws.Bool(d.Get("use_opsworks_security_groups").(bool)),
+	}
+	req.ConfigurationManager = &opsworks.StackConfigurationManager{
+		Name:    aws.String(d.Get("configuration_manager_name").(string)),
+		Version: aws.String(d.Get("configuration_manager_version").(string)),
 	}
 	inVpc := false
 	if vpcId, ok := d.GetOk("vpc_id"); ok {
@@ -320,11 +338,14 @@ func resourceAwsOpsworksStackCreate(d *schema.ResourceData, meta interface{}) er
 	if defaultAvailabilityZone, ok := d.GetOk("default_availability_zone"); ok {
 		req.DefaultAvailabilityZone = aws.String(defaultAvailabilityZone.(string))
 	}
+	if defaultRootDeviceType, ok := d.GetOk("default_root_device_type"); ok {
+		req.DefaultRootDeviceType = aws.String(defaultRootDeviceType.(string))
+	}
 
 	log.Printf("[DEBUG] Creating OpsWorks stack: %s", req)
 
 	var resp *opsworks.CreateStackOutput
-	err = resource.Retry(20*time.Minute, func() error {
+	err = resource.Retry(20*time.Minute, func() *resource.RetryError {
 		var cerr error
 		resp, cerr = client.CreateStack(req)
 		if cerr != nil {
@@ -340,12 +361,13 @@ func resourceAwsOpsworksStackCreate(d *schema.ResourceData, meta interface{}) er
 				// Service Role Arn: [...] is not yet propagated, please try again in a couple of minutes
 				propErr := "not yet propagated"
 				trustErr := "not the necessary trust relationship"
-				if opserr.Code() == "ValidationException" && (strings.Contains(opserr.Message(), trustErr) || strings.Contains(opserr.Message(), propErr)) {
+				validateErr := "validate IAM role permission"
+				if opserr.Code() == "ValidationException" && (strings.Contains(opserr.Message(), trustErr) || strings.Contains(opserr.Message(), propErr) || strings.Contains(opserr.Message(), validateErr)) {
 					log.Printf("[INFO] Waiting for service IAM role to propagate")
-					return cerr
+					return resource.RetryableError(cerr)
 				}
 			}
-			return resource.RetryError{Err: cerr}
+			return resource.NonRetryableError(cerr)
 		}
 		return nil
 	})
@@ -390,6 +412,9 @@ func resourceAwsOpsworksStackUpdate(d *schema.ResourceData, meta interface{}) er
 		UseOpsworksSecurityGroups: aws.Bool(d.Get("use_opsworks_security_groups").(bool)),
 		Attributes:                make(map[string]*string),
 		CustomCookbooksSource:     resourceAwsOpsworksStackCustomCookbooksSource(d),
+	}
+	if v, ok := d.GetOk("agent_version"); ok {
+		req.AgentVersion = aws.String(v.(string))
 	}
 	if v, ok := d.GetOk("default_os"); ok {
 		req.DefaultOs = aws.String(v.(string))

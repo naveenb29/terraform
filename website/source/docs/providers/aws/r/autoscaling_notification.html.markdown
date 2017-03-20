@@ -22,27 +22,32 @@ resource "aws_autoscaling_notification" "example_notifications" {
     "${aws_autoscaling_group.bar.name}",
     "${aws_autoscaling_group.foo.name}",
   ]
-  notifications  = [
-    "autoscaling:EC2_INSTANCE_LAUNCH", 
+
+  notifications = [
+    "autoscaling:EC2_INSTANCE_LAUNCH",
     "autoscaling:EC2_INSTANCE_TERMINATE",
-    "autoscaling:EC2_INSTANCE_LAUNCH_ERROR"
+    "autoscaling:EC2_INSTANCE_LAUNCH_ERROR",
   ]
+
   topic_arn = "${aws_sns_topic.example.arn}"
 }
 
 resource "aws_sns_topic" "example" {
   name = "example-topic"
+
   # arn is an exported attribute
 }
 
 resource "aws_autoscaling_group" "bar" {
   name = "foobar1-terraform-test"
-  [... ASG attributes ...]
+
+  # ...
 }
 
 resource "aws_autoscaling_group" "foo" {
   name = "barfoo-terraform-test"
-  [... ASG attributes ...]
+
+  # ...
 }
 ```
 
@@ -52,17 +57,17 @@ The following arguments are supported:
 
 * `group_names` - (Required) A list of AutoScaling Group Names
 * `notifications` - (Required) A list of Notification Types that trigger
-notifications. Acceptable are documented [in the AWS documentation here][1]
+notifications. Acceptable values are documented [in the AWS documentation here][1]
 * `topic_arn` - (Required) The Topic ARN for notifications to be sent through
 
 ## Attributes Reference
 
 The following attributes are exported:
 
-* `group_names` 
+* `group_names`
 * `notifications`
-* `topic_arn` 
+* `topic_arn`
 
 
 [1]: https://docs.aws.amazon.com/AutoScaling/latest/APIReference/API_NotificationConfiguration.html
-[2]: https://docs.aws.amazon.com/AutoScaling/latest/APIReference/API_DescribeNotificationConfigurations.html 
+[2]: https://docs.aws.amazon.com/AutoScaling/latest/APIReference/API_DescribeNotificationConfigurations.html

@@ -23,20 +23,23 @@ func resourceStorageObjectAcl() *schema.Resource {
 				Required: true,
 				ForceNew: true,
 			},
+
 			"object": &schema.Schema{
 				Type:     schema.TypeString,
 				Required: true,
 				ForceNew: true,
 			},
-			"role_entity": &schema.Schema{
-				Type:     schema.TypeList,
-				Optional: true,
-				Elem:     &schema.Schema{Type: schema.TypeString},
-			},
+
 			"predefined_acl": &schema.Schema{
 				Type:     schema.TypeString,
 				Optional: true,
 				ForceNew: true,
+			},
+
+			"role_entity": &schema.Schema{
+				Type:     schema.TypeList,
+				Optional: true,
+				Elem:     &schema.Schema{Type: schema.TypeString},
 			},
 		},
 	}
@@ -147,15 +150,8 @@ func resourceStorageObjectAclRead(d *schema.ResourceData, meta interface{}) erro
 		}
 
 		for _, v := range res.Items {
-			role := ""
-			entity := ""
-			for key, val := range v.(map[string]interface{}) {
-				if key == "role" {
-					role = val.(string)
-				} else if key == "entity" {
-					entity = val.(string)
-				}
-			}
+			role := v.Role
+			entity := v.Entity
 			if _, in := re_local_map[entity]; in {
 				role_entity = append(role_entity, fmt.Sprintf("%s:%s", role, entity))
 				log.Printf("[DEBUG]: saving re %s-%s", role, entity)

@@ -5,12 +5,14 @@ import (
 	"log"
 	"net"
 	"regexp"
-	"time"
 
-	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/helper/schema"
 	"google.golang.org/api/container/v1"
 	"google.golang.org/api/googleapi"
+)
+
+var (
+	instanceGroupManagerURL = regexp.MustCompile("^https://www.googleapis.com/compute/v1/projects/([a-z][a-z0-9-]{5}(?:[-a-z0-9]{0,23}[a-z0-9])?)/zones/([a-z0-9-]*)/instanceGroupManagers/([^/]*)")
 )
 
 func resourceContainerCluster() *schema.Resource {
@@ -21,57 +23,9 @@ func resourceContainerCluster() *schema.Resource {
 		Delete: resourceContainerClusterDelete,
 
 		Schema: map[string]*schema.Schema{
-			"zone": &schema.Schema{
-				Type:     schema.TypeString,
+			"initial_node_count": &schema.Schema{
+				Type:     schema.TypeInt,
 				Required: true,
-				ForceNew: true,
-			},
-
-			"node_version": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				Computed: true,
-			},
-
-			"cluster_ipv4_cidr": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				Computed: true,
-				ForceNew: true,
-				ValidateFunc: func(v interface{}, k string) (ws []string, errors []error) {
-					value := v.(string)
-					_, ipnet, err := net.ParseCIDR(value)
-
-					if err != nil || ipnet == nil || value != ipnet.String() {
-						errors = append(errors, fmt.Errorf(
-							"%q must contain a valid CIDR", k))
-					}
-					return
-				},
-			},
-
-			"description": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				ForceNew: true,
-			},
-
-			"endpoint": &schema.Schema{
-				Type:     schema.TypeString,
-				Computed: true,
-			},
-
-			"logging_service": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				Computed: true,
-				ForceNew: true,
-			},
-
-			"monitoring_service": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				Computed: true,
 				ForceNew: true,
 			},
 
@@ -93,13 +47,11 @@ func resourceContainerCluster() *schema.Resource {
 							Type:     schema.TypeString,
 							Computed: true,
 						},
-
 						"password": &schema.Schema{
 							Type:     schema.TypeString,
 							Required: true,
 							ForceNew: true,
 						},
-
 						"username": &schema.Schema{
 							Type:     schema.TypeString,
 							Required: true,
@@ -136,13 +88,119 @@ func resourceContainerCluster() *schema.Resource {
 				},
 			},
 
+			"zone": &schema.Schema{
+				Type:     schema.TypeString,
+				Required: true,
+				ForceNew: true,
+			},
+
+			"additional_zones": &schema.Schema{
+				Type:     schema.TypeList,
+				Optional: true,
+				Computed: true,
+				ForceNew: true,
+				Elem:     &schema.Schema{Type: schema.TypeString},
+			},
+
+			"cluster_ipv4_cidr": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+				Computed: true,
+				ForceNew: true,
+				ValidateFunc: func(v interface{}, k string) (ws []string, errors []error) {
+					value := v.(string)
+					_, ipnet, err := net.ParseCIDR(value)
+
+					if err != nil || ipnet == nil || value != ipnet.String() {
+						errors = append(errors, fmt.Errorf(
+							"%q must contain a valid CIDR", k))
+					}
+					return
+				},
+			},
+
+			"description": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+				ForceNew: true,
+			},
+
+			"endpoint": &schema.Schema{
+				Type:     schema.TypeString,
+				Computed: true,
+			},
+
+			"instance_group_urls": &schema.Schema{
+				Type:     schema.TypeList,
+				Computed: true,
+				Elem:     &schema.Schema{Type: schema.TypeString},
+			},
+
+			"logging_service": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+				Computed: true,
+				ForceNew: true,
+			},
+
+			"monitoring_service": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+				Computed: true,
+				ForceNew: true,
+			},
+
 			"network": &schema.Schema{
 				Type:     schema.TypeString,
 				Optional: true,
 				Default:  "default",
 				ForceNew: true,
 			},
-
+			"subnetwork": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+				ForceNew: true,
+			},
+			"addons_config": &schema.Schema{
+				Type:     schema.TypeList,
+				Optional: true,
+				ForceNew: true,
+				MaxItems: 1,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"http_load_balancing": &schema.Schema{
+							Type:     schema.TypeList,
+							Optional: true,
+							ForceNew: true,
+							MaxItems: 1,
+							Elem: &schema.Resource{
+								Schema: map[string]*schema.Schema{
+									"disabled": &schema.Schema{
+										Type:     schema.TypeBool,
+										Optional: true,
+										ForceNew: true,
+									},
+								},
+							},
+						},
+						"horizontal_pod_autoscaling": &schema.Schema{
+							Type:     schema.TypeList,
+							Optional: true,
+							ForceNew: true,
+							MaxItems: 1,
+							Elem: &schema.Resource{
+								Schema: map[string]*schema.Schema{
+									"disabled": &schema.Schema{
+										Type:     schema.TypeBool,
+										Optional: true,
+										ForceNew: true,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
 			"node_config": &schema.Schema{
 				Type:     schema.TypeList,
 				Optional: true,
@@ -175,25 +233,30 @@ func resourceContainerCluster() *schema.Resource {
 
 						"oauth_scopes": &schema.Schema{
 							Type:     schema.TypeList,
-							Elem:     &schema.Schema{Type: schema.TypeString},
 							Optional: true,
 							Computed: true,
 							ForceNew: true,
+							Elem: &schema.Schema{
+								Type: schema.TypeString,
+								StateFunc: func(v interface{}) string {
+									return canonicalizeServiceScope(v.(string))
+								},
+							},
 						},
 					},
 				},
 			},
 
-			"initial_node_count": &schema.Schema{
-				Type:     schema.TypeInt,
-				Required: true,
-				ForceNew: true,
+			"node_version": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+				Computed: true,
 			},
 
-			"instance_group_urls": &schema.Schema{
-				Type:     schema.TypeList,
-				Computed: true,
-				Elem:     &schema.Schema{Type: schema.TypeString},
+			"project": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+				ForceNew: true,
 			},
 		},
 	}
@@ -201,6 +264,11 @@ func resourceContainerCluster() *schema.Resource {
 
 func resourceContainerClusterCreate(d *schema.ResourceData, meta interface{}) error {
 	config := meta.(*Config)
+
+	project, err := getProject(d, config)
+	if err != nil {
+		return err
+	}
 
 	zoneName := d.Get("zone").(string)
 	clusterName := d.Get("name").(string)
@@ -220,6 +288,24 @@ func resourceContainerClusterCreate(d *schema.ResourceData, meta interface{}) er
 		InitialNodeCount: int64(d.Get("initial_node_count").(int)),
 	}
 
+	if v, ok := d.GetOk("node_version"); ok {
+		cluster.InitialClusterVersion = v.(string)
+	}
+
+	if v, ok := d.GetOk("additional_zones"); ok {
+		locationsList := v.([]interface{})
+		locations := []string{}
+		for _, v := range locationsList {
+			location := v.(string)
+			locations = append(locations, location)
+			if location == zoneName {
+				return fmt.Errorf("additional_zones should not contain the original 'zone'.")
+			}
+		}
+		locations = append(locations, zoneName)
+		cluster.Locations = locations
+	}
+
 	if v, ok := d.GetOk("cluster_ipv4_cidr"); ok {
 		cluster.ClusterIpv4Cidr = v.(string)
 	}
@@ -236,10 +322,36 @@ func resourceContainerClusterCreate(d *schema.ResourceData, meta interface{}) er
 		cluster.MonitoringService = v.(string)
 	}
 
-	if v, ok := d.GetOk("network"); ok {
-		cluster.Network = v.(string)
+	if _, ok := d.GetOk("network"); ok {
+		network, err := getNetworkName(d, "network")
+		if err != nil {
+			return err
+		}
+		cluster.Network = network
 	}
 
+	if v, ok := d.GetOk("subnetwork"); ok {
+		cluster.Subnetwork = v.(string)
+	}
+
+	if v, ok := d.GetOk("addons_config"); ok {
+		addonsConfig := v.([]interface{})[0].(map[string]interface{})
+		cluster.AddonsConfig = &container.AddonsConfig{}
+
+		if v, ok := addonsConfig["http_load_balancing"]; ok {
+			addon := v.([]interface{})[0].(map[string]interface{})
+			cluster.AddonsConfig.HttpLoadBalancing = &container.HttpLoadBalancing{
+				Disabled: addon["disabled"].(bool),
+			}
+		}
+
+		if v, ok := addonsConfig["horizontal_pod_autoscaling"]; ok {
+			addon := v.([]interface{})[0].(map[string]interface{})
+			cluster.AddonsConfig.HorizontalPodAutoscaling = &container.HorizontalPodAutoscaling{
+				Disabled: addon["disabled"].(bool),
+			}
+		}
+	}
 	if v, ok := d.GetOk("node_config"); ok {
 		nodeConfigs := v.([]interface{})
 		if len(nodeConfigs) > 1 {
@@ -261,7 +373,7 @@ func resourceContainerClusterCreate(d *schema.ResourceData, meta interface{}) er
 			scopesList := v.([]interface{})
 			scopes := []string{}
 			for _, v := range scopesList {
-				scopes = append(scopes, v.(string))
+				scopes = append(scopes, canonicalizeServiceScope(v.(string)))
 			}
 
 			cluster.NodeConfig.OauthScopes = scopes
@@ -273,29 +385,17 @@ func resourceContainerClusterCreate(d *schema.ResourceData, meta interface{}) er
 	}
 
 	op, err := config.clientContainer.Projects.Zones.Clusters.Create(
-		config.Project, zoneName, req).Do()
+		project, zoneName, req).Do()
 	if err != nil {
 		return err
 	}
 
 	// Wait until it's created
-	wait := resource.StateChangeConf{
-		Pending:    []string{"PENDING", "RUNNING"},
-		Target:     []string{"DONE"},
-		Timeout:    30 * time.Minute,
-		MinTimeout: 3 * time.Second,
-		Refresh: func() (interface{}, string, error) {
-			resp, err := config.clientContainer.Projects.Zones.Operations.Get(
-				config.Project, zoneName, op.Name).Do()
-			log.Printf("[DEBUG] Progress of creating GKE cluster %s: %s",
-				clusterName, resp.Status)
-			return resp, resp.Status, err
-		},
-	}
-
-	_, err = wait.WaitForState()
-	if err != nil {
-		return err
+	waitErr := containerOperationWait(config, op, project, zoneName, "creating GKE cluster", 30, 3)
+	if waitErr != nil {
+		// The resource didn't actually create
+		d.SetId("")
+		return waitErr
 	}
 
 	log.Printf("[INFO] GKE cluster %s has been created", clusterName)
@@ -308,10 +408,15 @@ func resourceContainerClusterCreate(d *schema.ResourceData, meta interface{}) er
 func resourceContainerClusterRead(d *schema.ResourceData, meta interface{}) error {
 	config := meta.(*Config)
 
+	project, err := getProject(d, config)
+	if err != nil {
+		return err
+	}
+
 	zoneName := d.Get("zone").(string)
 
 	cluster, err := config.clientContainer.Projects.Zones.Clusters.Get(
-		config.Project, zoneName, d.Get("name").(string)).Do()
+		project, zoneName, d.Get("name").(string)).Do()
 	if err != nil {
 		if gerr, ok := err.(*googleapi.Error); ok && gerr.Code == 404 {
 			log.Printf("[WARN] Removing Container Cluster %q because it's gone", d.Get("name").(string))
@@ -326,6 +431,17 @@ func resourceContainerClusterRead(d *schema.ResourceData, meta interface{}) erro
 
 	d.Set("name", cluster.Name)
 	d.Set("zone", cluster.Zone)
+
+	locations := []string{}
+	if len(cluster.Locations) > 1 {
+		for _, location := range cluster.Locations {
+			if location != cluster.Zone {
+				locations = append(locations, location)
+			}
+		}
+	}
+	d.Set("additional_zones", locations)
+
 	d.Set("endpoint", cluster.Endpoint)
 
 	masterAuth := []map[string]interface{}{
@@ -345,15 +461,42 @@ func resourceContainerClusterRead(d *schema.ResourceData, meta interface{}) erro
 	d.Set("description", cluster.Description)
 	d.Set("logging_service", cluster.LoggingService)
 	d.Set("monitoring_service", cluster.MonitoringService)
-	d.Set("network", cluster.Network)
+	d.Set("network", d.Get("network").(string))
+	d.Set("subnetwork", cluster.Subnetwork)
 	d.Set("node_config", flattenClusterNodeConfig(cluster.NodeConfig))
-	d.Set("instance_group_urls", cluster.InstanceGroupUrls)
+
+	// container engine's API currently mistakenly returns the instance group manager's
+	// URL instead of the instance group's URL in its responses. This shim detects that
+	// error, and corrects it, by fetching the instance group manager URL and retrieving
+	// the instance group manager, then using that to look up the instance group URL, which
+	// is then substituted.
+	//
+	// This should be removed when the API response is fixed.
+	instanceGroupURLs := make([]string, 0, len(cluster.InstanceGroupUrls))
+	for _, u := range cluster.InstanceGroupUrls {
+		if !instanceGroupManagerURL.MatchString(u) {
+			instanceGroupURLs = append(instanceGroupURLs, u)
+			continue
+		}
+		matches := instanceGroupManagerURL.FindStringSubmatch(u)
+		instanceGroupManager, err := config.clientCompute.InstanceGroupManagers.Get(matches[1], matches[2], matches[3]).Do()
+		if err != nil {
+			return fmt.Errorf("Error reading instance group manager returned as an instance group URL: %s", err)
+		}
+		instanceGroupURLs = append(instanceGroupURLs, instanceGroupManager.InstanceGroup)
+	}
+	d.Set("instance_group_urls", instanceGroupURLs)
 
 	return nil
 }
 
 func resourceContainerClusterUpdate(d *schema.ResourceData, meta interface{}) error {
 	config := meta.(*Config)
+
+	project, err := getProject(d, config)
+	if err != nil {
+		return err
+	}
 
 	zoneName := d.Get("zone").(string)
 	clusterName := d.Get("name").(string)
@@ -365,30 +508,15 @@ func resourceContainerClusterUpdate(d *schema.ResourceData, meta interface{}) er
 		},
 	}
 	op, err := config.clientContainer.Projects.Zones.Clusters.Update(
-		config.Project, zoneName, clusterName, req).Do()
+		project, zoneName, clusterName, req).Do()
 	if err != nil {
 		return err
 	}
 
 	// Wait until it's updated
-	wait := resource.StateChangeConf{
-		Pending:    []string{"PENDING", "RUNNING"},
-		Target:     []string{"DONE"},
-		Timeout:    10 * time.Minute,
-		MinTimeout: 2 * time.Second,
-		Refresh: func() (interface{}, string, error) {
-			log.Printf("[DEBUG] Checking if GKE cluster %s is updated", clusterName)
-			resp, err := config.clientContainer.Projects.Zones.Operations.Get(
-				config.Project, zoneName, op.Name).Do()
-			log.Printf("[DEBUG] Progress of updating GKE cluster %s: %s",
-				clusterName, resp.Status)
-			return resp, resp.Status, err
-		},
-	}
-
-	_, err = wait.WaitForState()
-	if err != nil {
-		return err
+	waitErr := containerOperationWait(config, op, project, zoneName, "updating GKE cluster", 10, 2)
+	if waitErr != nil {
+		return waitErr
 	}
 
 	log.Printf("[INFO] GKE cluster %s has been updated to %s", d.Id(),
@@ -400,35 +528,25 @@ func resourceContainerClusterUpdate(d *schema.ResourceData, meta interface{}) er
 func resourceContainerClusterDelete(d *schema.ResourceData, meta interface{}) error {
 	config := meta.(*Config)
 
+	project, err := getProject(d, config)
+	if err != nil {
+		return err
+	}
+
 	zoneName := d.Get("zone").(string)
 	clusterName := d.Get("name").(string)
 
 	log.Printf("[DEBUG] Deleting GKE cluster %s", d.Get("name").(string))
 	op, err := config.clientContainer.Projects.Zones.Clusters.Delete(
-		config.Project, zoneName, clusterName).Do()
+		project, zoneName, clusterName).Do()
 	if err != nil {
 		return err
 	}
 
 	// Wait until it's deleted
-	wait := resource.StateChangeConf{
-		Pending:    []string{"PENDING", "RUNNING"},
-		Target:     []string{"DONE"},
-		Timeout:    10 * time.Minute,
-		MinTimeout: 3 * time.Second,
-		Refresh: func() (interface{}, string, error) {
-			log.Printf("[DEBUG] Checking if GKE cluster %s is deleted", clusterName)
-			resp, err := config.clientContainer.Projects.Zones.Operations.Get(
-				config.Project, zoneName, op.Name).Do()
-			log.Printf("[DEBUG] Progress of deleting GKE cluster %s: %s",
-				clusterName, resp.Status)
-			return resp, resp.Status, err
-		},
-	}
-
-	_, err = wait.WaitForState()
-	if err != nil {
-		return err
+	waitErr := containerOperationWait(config, op, project, zoneName, "deleting GKE cluster", 10, 3)
+	if waitErr != nil {
+		return waitErr
 	}
 
 	log.Printf("[INFO] GKE cluster %s has been deleted", d.Id())

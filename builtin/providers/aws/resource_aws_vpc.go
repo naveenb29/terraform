@@ -3,7 +3,6 @@ package aws
 import (
 	"fmt"
 	"log"
-	"net"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -19,64 +18,81 @@ func resourceAwsVpc() *schema.Resource {
 		Read:   resourceAwsVpcRead,
 		Update: resourceAwsVpcUpdate,
 		Delete: resourceAwsVpcDelete,
+		Importer: &schema.ResourceImporter{
+			State: schema.ImportStatePassthrough,
+		},
 
 		Schema: map[string]*schema.Schema{
-			"cidr_block": &schema.Schema{
-				Type:     schema.TypeString,
-				Required: true,
-				ForceNew: true,
-				ValidateFunc: func(v interface{}, k string) (ws []string, errors []error) {
-					value := v.(string)
-					_, ipnet, err := net.ParseCIDR(value)
-
-					if err != nil || ipnet == nil || value != ipnet.String() {
-						errors = append(errors, fmt.Errorf(
-							"%q must contain a valid CIDR", k))
-					}
-					return
-				},
+			"cidr_block": {
+				Type:         schema.TypeString,
+				Required:     true,
+				ForceNew:     true,
+				ValidateFunc: validateCIDRNetworkAddress,
 			},
 
-			"instance_tenancy": &schema.Schema{
+			"instance_tenancy": {
 				Type:     schema.TypeString,
 				Optional: true,
 				ForceNew: true,
+				Computed: true,
 			},
 
-			"enable_dns_hostnames": &schema.Schema{
+			"enable_dns_hostnames": {
 				Type:     schema.TypeBool,
 				Optional: true,
 				Computed: true,
 			},
 
-			"enable_dns_support": &schema.Schema{
+			"enable_dns_support": {
+				Type:     schema.TypeBool,
+				Optional: true,
+				Default:  true,
+			},
+
+			"enable_classiclink": {
 				Type:     schema.TypeBool,
 				Optional: true,
 				Computed: true,
 			},
 
-			"enable_classiclink": &schema.Schema{
+			"assign_generated_ipv6_cidr_block": {
 				Type:     schema.TypeBool,
+				ForceNew: true,
 				Optional: true,
 				Default:  false,
 			},
 
-			"main_route_table_id": &schema.Schema{
+			"main_route_table_id": {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
 
-			"default_network_acl_id": &schema.Schema{
+			"default_network_acl_id": {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
 
-			"dhcp_options_id": &schema.Schema{
+			"dhcp_options_id": {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
 
-			"default_security_group_id": &schema.Schema{
+			"default_security_group_id": {
+				Type:     schema.TypeString,
+				Computed: true,
+			},
+
+			"default_route_table_id": {
+				Type:     schema.TypeString,
+				Computed: true,
+			},
+
+			"ipv6_association_id": {
+				Type:     schema.TypeString,
+				Computed: true,
+			},
+
+			"ipv6_cidr_block": {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
@@ -92,11 +108,14 @@ func resourceAwsVpcCreate(d *schema.ResourceData, meta interface{}) error {
 	if v, ok := d.GetOk("instance_tenancy"); ok {
 		instance_tenancy = v.(string)
 	}
+
 	// Create the VPC
 	createOpts := &ec2.CreateVpcInput{
-		CidrBlock:       aws.String(d.Get("cidr_block").(string)),
-		InstanceTenancy: aws.String(instance_tenancy),
+		CidrBlock:                   aws.String(d.Get("cidr_block").(string)),
+		InstanceTenancy:             aws.String(instance_tenancy),
+		AmazonProvidedIpv6CidrBlock: aws.Bool(d.Get("assign_generated_ipv6_cidr_block").(bool)),
 	}
+
 	log.Printf("[DEBUG] VPC create config: %#v", *createOpts)
 	vpcResp, err := conn.CreateVpc(createOpts)
 	if err != nil {
@@ -150,9 +169,18 @@ func resourceAwsVpcRead(d *schema.ResourceData, meta interface{}) error {
 	vpcid := d.Id()
 	d.Set("cidr_block", vpc.CidrBlock)
 	d.Set("dhcp_options_id", vpc.DhcpOptionsId)
+	d.Set("instance_tenancy", vpc.InstanceTenancy)
 
 	// Tags
 	d.Set("tags", tagsToMap(vpc.Tags))
+
+	if vpc.Ipv6CidrBlockAssociationSet != nil {
+		d.Set("assign_generated_ipv6_cidr_block", true)
+		d.Set("ipv6_association_id", vpc.Ipv6CidrBlockAssociationSet[0].AssociationId)
+		d.Set("ipv6_cidr_block", vpc.Ipv6CidrBlockAssociationSet[0].Ipv6CidrBlock)
+	} else {
+		d.Set("assign_generated_ipv6_cidr_block", false)
+	}
 
 	// Attributes
 	attribute := "enableDnsSupport"
@@ -164,7 +192,7 @@ func resourceAwsVpcRead(d *schema.ResourceData, meta interface{}) error {
 	if err != nil {
 		return err
 	}
-	d.Set("enable_dns_support", *resp.EnableDnsSupport)
+	d.Set("enable_dns_support", *resp.EnableDnsSupport.Value)
 	attribute = "enableDnsHostnames"
 	DescribeAttrOpts = &ec2.DescribeVpcAttributeInput{
 		Attribute: &attribute,
@@ -174,7 +202,7 @@ func resourceAwsVpcRead(d *schema.ResourceData, meta interface{}) error {
 	if err != nil {
 		return err
 	}
-	d.Set("enable_dns_hostnames", *resp.EnableDnsHostnames)
+	d.Set("enable_dns_hostnames", *resp.EnableDnsHostnames.Value)
 
 	DescribeClassiclinkOpts := &ec2.DescribeVpcClassicLinkInput{
 		VpcIds: []*string{&vpcid},
@@ -222,8 +250,15 @@ func resourceAwsVpcRead(d *schema.ResourceData, meta interface{}) error {
 		d.Set("main_route_table_id", *v[0].RouteTableId)
 	}
 
-	resourceAwsVpcSetDefaultNetworkAcl(conn, d)
-	resourceAwsVpcSetDefaultSecurityGroup(conn, d)
+	if err := resourceAwsVpcSetDefaultNetworkAcl(conn, d); err != nil {
+		log.Printf("[WARN] Unable to set Default Network ACL: %s", err)
+	}
+	if err := resourceAwsVpcSetDefaultSecurityGroup(conn, d); err != nil {
+		log.Printf("[WARN] Unable to set Default Security Group: %s", err)
+	}
+	if err := resourceAwsVpcSetDefaultRouteTable(conn, d); err != nil {
+		log.Printf("[WARN] Unable to set Default Route Table: %s", err)
+	}
 
 	return nil
 }
@@ -244,16 +279,18 @@ func resourceAwsVpcUpdate(d *schema.ResourceData, meta interface{}) error {
 		}
 
 		log.Printf(
-			"[INFO] Modifying enable_dns_support vpc attribute for %s: %#v",
+			"[INFO] Modifying enable_dns_hostnames vpc attribute for %s: %s",
 			d.Id(), modifyOpts)
 		if _, err := conn.ModifyVpcAttribute(modifyOpts); err != nil {
 			return err
 		}
 
-		d.SetPartial("enable_dns_support")
+		d.SetPartial("enable_dns_hostnames")
 	}
 
-	if d.HasChange("enable_dns_support") {
+	_, hasEnableDnsSupportOption := d.GetOk("enable_dns_support")
+
+	if !hasEnableDnsSupportOption || d.HasChange("enable_dns_support") {
 		val := d.Get("enable_dns_support").(bool)
 		modifyOpts := &ec2.ModifyVpcAttributeInput{
 			VpcId: &vpcid,
@@ -263,7 +300,7 @@ func resourceAwsVpcUpdate(d *schema.ResourceData, meta interface{}) error {
 		}
 
 		log.Printf(
-			"[INFO] Modifying enable_dns_support vpc attribute for %s: %#v",
+			"[INFO] Modifying enable_dns_support vpc attribute for %s: %s",
 			d.Id(), modifyOpts)
 		if _, err := conn.ModifyVpcAttribute(modifyOpts); err != nil {
 			return err
@@ -318,7 +355,7 @@ func resourceAwsVpcDelete(d *schema.ResourceData, meta interface{}) error {
 	}
 	log.Printf("[INFO] Deleting VPC: %s", d.Id())
 
-	return resource.Retry(5*time.Minute, func() error {
+	return resource.Retry(5*time.Minute, func() *resource.RetryError {
 		_, err := conn.DeleteVpc(DeleteVpcOpts)
 		if err == nil {
 			return nil
@@ -326,19 +363,17 @@ func resourceAwsVpcDelete(d *schema.ResourceData, meta interface{}) error {
 
 		ec2err, ok := err.(awserr.Error)
 		if !ok {
-			return &resource.RetryError{Err: err}
+			return resource.NonRetryableError(err)
 		}
 
 		switch ec2err.Code() {
 		case "InvalidVpcID.NotFound":
 			return nil
 		case "DependencyViolation":
-			return err
+			return resource.RetryableError(err)
 		}
 
-		return &resource.RetryError{
-			Err: fmt.Errorf("Error deleting VPC: %s", err),
-		}
+		return resource.NonRetryableError(fmt.Errorf("Error deleting VPC: %s", err))
 	})
 }
 
@@ -414,6 +449,35 @@ func resourceAwsVpcSetDefaultSecurityGroup(conn *ec2.EC2, d *schema.ResourceData
 	if v := securityGroupResp.SecurityGroups; len(v) > 0 {
 		d.Set("default_security_group_id", v[0].GroupId)
 	}
+
+	return nil
+}
+
+func resourceAwsVpcSetDefaultRouteTable(conn *ec2.EC2, d *schema.ResourceData) error {
+	filter1 := &ec2.Filter{
+		Name:   aws.String("association.main"),
+		Values: []*string{aws.String("true")},
+	}
+	filter2 := &ec2.Filter{
+		Name:   aws.String("vpc-id"),
+		Values: []*string{aws.String(d.Id())},
+	}
+
+	findOpts := &ec2.DescribeRouteTablesInput{
+		Filters: []*ec2.Filter{filter1, filter2},
+	}
+
+	resp, err := conn.DescribeRouteTables(findOpts)
+	if err != nil {
+		return err
+	}
+
+	if len(resp.RouteTables) < 1 || resp.RouteTables[0] == nil {
+		return fmt.Errorf("Default Route table not found")
+	}
+
+	// There Can Be Only 1 ... Default Route Table
+	d.Set("default_route_table_id", resp.RouteTables[0].RouteTableId)
 
 	return nil
 }

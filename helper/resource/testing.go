@@ -7,11 +7,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/hashicorp/go-getter"
+	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/terraform/config/module"
 	"github.com/hashicorp/terraform/helper/logging"
 	"github.com/hashicorp/terraform/terraform"
@@ -19,11 +22,21 @@ import (
 
 const TestEnvVar = "TF_ACC"
 
+// TestProvider can be implemented by any ResourceProvider to provide custom
+// reset functionality at the start of an acceptance test.
+// The helper/schema Provider implements this interface.
+type TestProvider interface {
+	TestReset() error
+}
+
 // TestCheckFunc is the callback type used with acceptance tests to check
 // the state of a resource. The state passed in is the latest state known,
 // or in the case of being after a destroy, it is the last known state when
 // it was created.
 type TestCheckFunc func(*terraform.State) error
+
+// ImportStateCheckFunc is the check function for ImportState tests
+type ImportStateCheckFunc func([]*terraform.InstanceState) error
 
 // TestCase is a single acceptance test case used to test the apply/destroy
 // lifecycle of a resource in a specific configuration.
@@ -31,6 +44,13 @@ type TestCheckFunc func(*terraform.State) error
 // When the destroy plan is executed, the config from the last TestStep
 // is used to plan it.
 type TestCase struct {
+	// IsUnitTest allows a test to run regardless of the TF_ACC
+	// environment variable. This should be used with care - only for
+	// fast tests on local resources (e.g. remote state with a local
+	// backend) but can be used to increase confidence in correct
+	// operation of Terraform without waiting for a full acctest run.
+	IsUnitTest bool
+
 	// PreCheck, if non-nil, will be called before any test steps are
 	// executed. It will only be executed in the case that the steps
 	// would run, so it can be used for some validation before running
@@ -47,6 +67,10 @@ type TestCase struct {
 	Providers         map[string]terraform.ResourceProvider
 	ProviderFactories map[string]terraform.ResourceProviderFactory
 
+	// PreventPostDestroyRefresh can be set to true for cases where data sources
+	// are tested alongside real resources
+	PreventPostDestroyRefresh bool
+
 	// CheckDestroy is called after the resource is finally destroyed
 	// to allow the tester to test that the resource is truly gone.
 	CheckDestroy TestCheckFunc
@@ -54,6 +78,18 @@ type TestCase struct {
 	// Steps are the apply sequences done within the context of the
 	// same state. Each step can have its own check to verify correctness.
 	Steps []TestStep
+
+	// The settings below control the "ID-only refresh test." This is
+	// an enabled-by-default test that tests that a refresh can be
+	// refreshed with only an ID to result in the same attributes.
+	// This validates completeness of Refresh.
+	//
+	// IDRefreshName is the name of the resource to check. This will
+	// default to the first non-nil primary resource in the state.
+	//
+	// IDRefreshIgnore is a list of configuration keys that will be ignored.
+	IDRefreshName   string
+	IDRefreshIgnore []string
 }
 
 // TestStep is a single apply sequence of a test, done within the
@@ -63,11 +99,34 @@ type TestCase struct {
 // potentially complex update logic. In general, simply create/destroy
 // tests will only need one step.
 type TestStep struct {
+	// ResourceName should be set to the name of the resource
+	// that is being tested. Example: "aws_instance.foo". Various test
+	// modes use this to auto-detect state information.
+	//
+	// This is only required if the test mode settings below say it is
+	// for the mode you're using.
+	ResourceName string
+
 	// PreConfig is called before the Config is applied to perform any per-step
-	// setup that needs to happen
+	// setup that needs to happen. This is called regardless of "test mode"
+	// below.
 	PreConfig func()
 
-	// Config a string of the configuration to give to Terraform.
+	//---------------------------------------------------------------
+	// Test modes. One of the following groups of settings must be
+	// set to determine what the test step will do. Ideally we would've
+	// used Go interfaces here but there are now hundreds of tests we don't
+	// want to re-type so instead we just determine which step logic
+	// to run based on what settings below are set.
+	//---------------------------------------------------------------
+
+	//---------------------------------------------------------------
+	// Plan, Apply testing
+	//---------------------------------------------------------------
+
+	// Config a string of the configuration to give to Terraform. If this
+	// is set, then the TestCase will execute this step with the same logic
+	// as a `terraform apply`.
 	Config string
 
 	// Check is called after the Config is applied. Use this step to
@@ -86,6 +145,44 @@ type TestStep struct {
 	// ExpectNonEmptyPlan can be set to true for specific types of tests that are
 	// looking to verify that a diff occurs
 	ExpectNonEmptyPlan bool
+
+	// ExpectError allows the construction of test cases that we expect to fail
+	// with an error. The specified regexp must match against the error for the
+	// test to pass.
+	ExpectError *regexp.Regexp
+
+	// PreventPostDestroyRefresh can be set to true for cases where data sources
+	// are tested alongside real resources
+	PreventPostDestroyRefresh bool
+
+	//---------------------------------------------------------------
+	// ImportState testing
+	//---------------------------------------------------------------
+
+	// ImportState, if true, will test the functionality of ImportState
+	// by importing the resource with ResourceName (must be set) and the
+	// ID of that resource.
+	ImportState bool
+
+	// ImportStateId is the ID to perform an ImportState operation with.
+	// This is optional. If it isn't set, then the resource ID is automatically
+	// determined by inspecting the state for ResourceName's ID.
+	ImportStateId string
+
+	// ImportStateCheck checks the results of ImportState. It should be
+	// used to verify that the resulting value of ImportState has the
+	// proper resources, IDs, and attributes.
+	ImportStateCheck ImportStateCheckFunc
+
+	// ImportStateVerify, if true, will also check that the state values
+	// that are finally put into the state after import match for all the
+	// IDs returned by the Import.
+	//
+	// ImportStateVerifyIgnore are fields that should not be verified to
+	// be equal. These can be set to ephemeral fields or fields that can't
+	// be refreshed and don't matter.
+	ImportStateVerify       bool
+	ImportStateVerifyIgnore []string
 }
 
 // Test performs an acceptance test on a resource.
@@ -100,8 +197,9 @@ type TestStep struct {
 // output.
 func Test(t TestT, c TestCase) {
 	// We only run acceptance tests if an env var is set because they're
-	// slow and generally require some outside configuration.
-	if os.Getenv(TestEnvVar) == "" {
+	// slow and generally require some outside configuration. You can opt out
+	// of this with OverrideEnvVar on individual TestCases.
+	if os.Getenv(TestEnvVar) == "" && !c.IsUnitTest {
 		t.Skip(fmt.Sprintf(
 			"Acceptance tests skipped unless env '%s' set",
 			TestEnvVar))
@@ -115,7 +213,7 @@ func Test(t TestT, c TestCase) {
 	log.SetOutput(logWriter)
 
 	// We require verbose mode so that the user knows what is going on.
-	if !testTesting && !testing.Verbose() {
+	if !testTesting && !testing.Verbose() && !c.IsUnitTest {
 		t.Fatal("Acceptance tests must be run with the -v flag on tests")
 		return
 	}
@@ -125,13 +223,9 @@ func Test(t TestT, c TestCase) {
 		c.PreCheck()
 	}
 
-	// Build our context options that we can
-	ctxProviders := c.ProviderFactories
-	if ctxProviders == nil {
-		ctxProviders = make(map[string]terraform.ResourceProviderFactory)
-		for k, p := range c.Providers {
-			ctxProviders[k] = terraform.ResourceProviderFactoryFixed(p)
-		}
+	ctxProviders, err := testProviderFactories(c)
+	if err != nil {
+		t.Fatal(err)
 	}
 	opts := terraform.ContextOpts{Providers: ctxProviders}
 
@@ -139,23 +233,92 @@ func Test(t TestT, c TestCase) {
 	var state *terraform.State
 
 	// Go through each step and run it
+	var idRefreshCheck *terraform.ResourceState
+	idRefresh := c.IDRefreshName != ""
+	errored := false
 	for i, step := range c.Steps {
 		var err error
 		log.Printf("[WARN] Test: Executing step %d", i)
-		state, err = testStep(opts, state, step)
+
+		// Determine the test mode to execute
+		if step.Config != "" {
+			state, err = testStepConfig(opts, state, step)
+		} else if step.ImportState {
+			state, err = testStepImportState(opts, state, step)
+		} else {
+			err = fmt.Errorf(
+				"unknown test mode for step. Please see TestStep docs\n\n%#v",
+				step)
+		}
+
+		// If there was an error, exit
 		if err != nil {
-			t.Error(fmt.Sprintf(
-				"Step %d error: %s", i, err))
-			break
+			// Perhaps we expected an error? Check if it matches
+			if step.ExpectError != nil {
+				if !step.ExpectError.MatchString(err.Error()) {
+					errored = true
+					t.Error(fmt.Sprintf(
+						"Step %d, expected error:\n\n%s\n\nTo match:\n\n%s\n\n",
+						i, err, step.ExpectError))
+					break
+				}
+			} else {
+				errored = true
+				t.Error(fmt.Sprintf(
+					"Step %d error: %s", i, err))
+				break
+			}
+		}
+
+		// If we've never checked an id-only refresh and our state isn't
+		// empty, find the first resource and test it.
+		if idRefresh && idRefreshCheck == nil && !state.Empty() {
+			// Find the first non-nil resource in the state
+			for _, m := range state.Modules {
+				if len(m.Resources) > 0 {
+					if v, ok := m.Resources[c.IDRefreshName]; ok {
+						idRefreshCheck = v
+					}
+
+					break
+				}
+			}
+
+			// If we have an instance to check for refreshes, do it
+			// immediately. We do it in the middle of another test
+			// because it shouldn't affect the overall state (refresh
+			// is read-only semantically) and we want to fail early if
+			// this fails. If refresh isn't read-only, then this will have
+			// caught a different bug.
+			if idRefreshCheck != nil {
+				log.Printf(
+					"[WARN] Test: Running ID-only refresh check on %s",
+					idRefreshCheck.Primary.ID)
+				if err := testIDOnlyRefresh(c, opts, step, idRefreshCheck); err != nil {
+					log.Printf("[ERROR] Test: ID-only test failed: %s", err)
+					t.Error(fmt.Sprintf(
+						"[ERROR] Test: ID-only test failed: %s", err))
+					break
+				}
+			}
+		}
+	}
+
+	// If we never checked an id-only refresh, it is a failure.
+	if idRefresh {
+		if !errored && len(c.Steps) > 0 && idRefreshCheck == nil {
+			t.Error("ID-only refresh check never ran.")
 		}
 	}
 
 	// If we have a state, then run the destroy
 	if state != nil {
+		lastStep := c.Steps[len(c.Steps)-1]
 		destroyStep := TestStep{
-			Config:  c.Steps[len(c.Steps)-1].Config,
-			Check:   c.CheckDestroy,
-			Destroy: true,
+			Config:                    lastStep.Config,
+			Check:                     c.CheckDestroy,
+			Destroy:                   true,
+			PreventPostDestroyRefresh: c.PreventPostDestroyRefresh,
 		}
 
 		log.Printf("[WARN] Test: Executing destroy step")
@@ -173,17 +336,160 @@ func Test(t TestT, c TestCase) {
 	}
 }
 
-func testStep(
+// testProviderFactories is a helper to build the ResourceProviderFactory map
+// with pre instantiated ResourceProviders, so that we can reset them for the
+// test, while only calling the factory function once.
+// Any errors are stored so that they can be returned by the factory in
+// terraform to match non-test behavior.
+func testProviderFactories(c TestCase) (map[string]terraform.ResourceProviderFactory, error) {
+	ctxProviders := make(map[string]terraform.ResourceProviderFactory)
+
+	// add any fixed providers
+	for k, p := range c.Providers {
+		ctxProviders[k] = terraform.ResourceProviderFactoryFixed(p)
+	}
+
+	// call any factory functions and store the result.
+	for k, pf := range c.ProviderFactories {
+		p, err := pf()
+		ctxProviders[k] = func() (terraform.ResourceProvider, error) {
+			return p, err
+		}
+	}
+
+	// reset the providers if needed
+	for k, pf := range ctxProviders {
+		// we can ignore any errors here, if we don't have a provider to reset
+		// the error will be handled later
+		p, _ := pf()
+		if p, ok := p.(TestProvider); ok {
+			err := p.TestReset()
+			if err != nil {
+				return nil, fmt.Errorf("[ERROR] failed to reset provider %q: %s", k, err)
+			}
+		}
+	}
+
+	return ctxProviders, nil
+}
+
+// UnitTest is a helper to force the acceptance testing harness to run in the
+// normal unit test suite. This should only be used for resource that don't
+// have any external dependencies.
+func UnitTest(t TestT, c TestCase) {
+	c.IsUnitTest = true
+	Test(t, c)
+}
+
+func testIDOnlyRefresh(c TestCase, opts terraform.ContextOpts, step TestStep, r *terraform.ResourceState) error {
+	// TODO: We guard by this right now so master doesn't explode. We
+	// need to remove this eventually to make this part of the normal tests.
+	if os.Getenv("TF_ACC_IDONLY") == "" {
+		return nil
+	}
+
+	name := fmt.Sprintf("%s.foo", r.Type)
+
+	// Build the state. The state is just the resource with an ID. There
+	// are no attributes. We only set what is needed to perform a refresh.
+	state := terraform.NewState()
+	state.RootModule().Resources[name] = &terraform.ResourceState{
+		Type: r.Type,
+		Primary: &terraform.InstanceState{
+			ID: r.Primary.ID,
+		},
+	}
+
+	// Create the config module. We use the full config because Refresh
+	// doesn't have access to it and we may need things like provider
+	// configurations. The initial implementation of id-only checks used
+	// an empty config module, but that caused the aforementioned problems.
+	mod, err := testModule(opts, step)
+	if err != nil {
+		return err
+	}
+
+	// Initialize the context
+	opts.Module = mod
+	opts.State = state
+	ctx, err := terraform.NewContext(&opts)
+	if err != nil {
+		return err
+	}
+	if ws, es := ctx.Validate(); len(ws) > 0 || len(es) > 0 {
+		if len(es) > 0 {
+			estrs := make([]string, len(es))
+			for i, e := range es {
+				estrs[i] = e.Error()
+			}
+			return fmt.Errorf(
+				"Configuration is invalid.\n\nWarnings: %#v\n\nErrors: %#v",
+				ws, estrs)
+		}
+
+		log.Printf("[WARN] Config warnings: %#v", ws)
+	}
+
+	// Refresh!
+	state, err = ctx.Refresh()
+	if err != nil {
+		return fmt.Errorf("Error refreshing: %s", err)
+	}
+
+	// Verify attribute equivalence.
+	actualR := state.RootModule().Resources[name]
+	if actualR == nil {
+		return fmt.Errorf("Resource gone!")
+	}
+	if actualR.Primary == nil {
+		return fmt.Errorf("Resource has no primary instance")
+	}
+	actual := actualR.Primary.Attributes
+	expected := r.Primary.Attributes
+	// Remove fields we're ignoring
+	for _, v := range c.IDRefreshIgnore {
+		for k, _ := range actual {
+			if strings.HasPrefix(k, v) {
+				delete(actual, k)
+			}
+		}
+		for k, _ := range expected {
+			if strings.HasPrefix(k, v) {
+				delete(expected, k)
+			}
+		}
+	}
+
+	if !reflect.DeepEqual(actual, expected) {
+		// Determine only the different attributes
+		for k, v := range expected {
+			if av, ok := actual[k]; ok && v == av {
+				delete(expected, k)
+				delete(actual, k)
+			}
+		}
+
+		spewConf := spew.NewDefaultConfig()
+		spewConf.SortKeys = true
+		return fmt.Errorf(
+			"Attributes not equivalent. Difference is shown below. Top is actual, bottom is expected."+
+				"\n\n%s\n\n%s",
+			spewConf.Sdump(actual), spewConf.Sdump(expected))
+	}
+
+	return nil
+}
+
+func testModule(
 	opts terraform.ContextOpts,
-	state *terraform.State,
-	step TestStep) (*terraform.State, error) {
+	step TestStep) (*module.Tree, error) {
 	if step.PreConfig != nil {
 		step.PreConfig()
 	}
 
 	cfgPath, err := ioutil.TempDir("", "tf-test")
 	if err != nil {
-		return state, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"Error creating temporary directory for config: %s", err)
 	}
 	defer os.RemoveAll(cfgPath)
@@ -191,21 +497,21 @@ func testStep(
 	// Write the configuration
 	cfgF, err := os.Create(filepath.Join(cfgPath, "main.tf"))
 	if err != nil {
-		return state, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"Error creating temporary file for config: %s", err)
 	}
 
 	_, err = io.Copy(cfgF, strings.NewReader(step.Config))
 	cfgF.Close()
 	if err != nil {
-		return state, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"Error creating temporary file for config: %s", err)
 	}
 
 	// Parse the configuration
 	mod, err := module.NewTreeModule("", cfgPath)
 	if err != nil {
-		return state, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"Error loading configuration: %s", err)
 	}
 
@@ -215,98 +521,27 @@ func testStep(
 	}
 	err = mod.Load(modStorage, module.GetModeGet)
 	if err != nil {
-		return state, fmt.Errorf("Error downloading modules: %s", err)
+		return nil, fmt.Errorf("Error downloading modules: %s", err)
 	}
 
-	// Build the context
-	opts.Module = mod
-	opts.State = state
-	opts.Destroy = step.Destroy
-	ctx := terraform.NewContext(&opts)
-	if ws, es := ctx.Validate(); len(ws) > 0 || len(es) > 0 {
-		if len(es) > 0 {
-			estrs := make([]string, len(es))
-			for i, e := range es {
-				estrs[i] = e.Error()
-			}
-			return state, fmt.Errorf(
-				"Configuration is invalid.\n\nWarnings: %#v\n\nErrors: %#v",
-				ws, estrs)
-		}
-		log.Printf("[WARN] Config warnings: %#v", ws)
+	return mod, nil
+}
+
+func testResource(c TestStep, state *terraform.State) (*terraform.ResourceState, error) {
+	if c.ResourceName == "" {
+		return nil, fmt.Errorf("ResourceName must be set in TestStep")
 	}
 
-	// Refresh!
-	state, err = ctx.Refresh()
-	if err != nil {
-		return state, fmt.Errorf(
-			"Error refreshing: %s", err)
-	}
-
-	// Plan!
-	if p, err := ctx.Plan(); err != nil {
-		return state, fmt.Errorf(
-			"Error planning: %s", err)
-	} else {
-		log.Printf("[WARN] Test: Step plan: %s", p)
-	}
-
-	// We need to keep a copy of the state prior to destroying
-	// such that destroy steps can verify their behaviour in the check
-	// function
-	stateBeforeApplication := state.DeepCopy()
-
-	// Apply!
-	state, err = ctx.Apply()
-	if err != nil {
-		return state, fmt.Errorf("Error applying: %s", err)
-	}
-
-	// Check! Excitement!
-	if step.Check != nil {
-		if step.Destroy {
-			if err := step.Check(stateBeforeApplication); err != nil {
-				return state, fmt.Errorf("Check failed: %s", err)
-			}
-		} else {
-			if err := step.Check(state); err != nil {
-				return state, fmt.Errorf("Check failed: %s", err)
+	for _, m := range state.Modules {
+		if len(m.Resources) > 0 {
+			if v, ok := m.Resources[c.ResourceName]; ok {
+				return v, nil
 			}
 		}
 	}
 
-	// Now, verify that Plan is now empty and we don't have a perpetual diff issue
-	// We do this with TWO plans. One without a refresh.
-	var p *terraform.Plan
-	if p, err = ctx.Plan(); err != nil {
-		return state, fmt.Errorf("Error on follow-up plan: %s", err)
-	}
-	if p.Diff != nil && !p.Diff.Empty() && !step.ExpectNonEmptyPlan {
-		return state, fmt.Errorf(
-			"After applying this step, the plan was not empty:\n\n%s", p)
-	}
-
-	// And another after a Refresh.
-	state, err = ctx.Refresh()
-	if err != nil {
-		return state, fmt.Errorf(
-			"Error on follow-up refresh: %s", err)
-	}
-	if p, err = ctx.Plan(); err != nil {
-		return state, fmt.Errorf("Error on second follow-up plan: %s", err)
-	}
-	if p.Diff != nil && !p.Diff.Empty() && !step.ExpectNonEmptyPlan {
-		return state, fmt.Errorf(
-			"After applying this step and refreshing, the plan was not empty:\n\n%s", p)
-	}
-
-	// Made it here, but expected a non-empty plan, fail!
-	if step.ExpectNonEmptyPlan && (p.Diff == nil || p.Diff.Empty()) {
-		return state, fmt.Errorf("Expected a non-empty plan, but got an empty plan!")
-	}
-
-	// Made it here? Good job test step!
-	return state, nil
+	return nil, fmt.Errorf(
+		"Resource specified by ResourceName couldn't be found: %s", c.ResourceName)
 }
 
 // ComposeTestCheckFunc lets you compose multiple TestCheckFuncs into
@@ -316,9 +551,9 @@ func testStep(
 // into smaller pieces more easily.
 func ComposeTestCheckFunc(fs ...TestCheckFunc) TestCheckFunc {
 	return func(s *terraform.State) error {
-		for _, f := range fs {
+		for i, f := range fs {
 			if err := f(s); err != nil {
-				return err
+				return fmt.Errorf("Check %d/%d error: %s", i+1, len(fs), err)
 			}
 		}
 
@@ -326,43 +561,97 @@ func ComposeTestCheckFunc(fs ...TestCheckFunc) TestCheckFunc {
 	}
 }
 
+// ComposeAggregateTestCheckFunc lets you compose multiple TestCheckFuncs into
+// a single TestCheckFunc.
+//
+// As a user testing their provider, this lets you decompose your checks
+// into smaller pieces more easily.
+//
+// Unlike ComposeTestCheckFunc, ComposeAggergateTestCheckFunc runs _all_ of the
+// TestCheckFuncs and aggregates failures.
+func ComposeAggregateTestCheckFunc(fs ...TestCheckFunc) TestCheckFunc {
+	return func(s *terraform.State) error {
+		var result *multierror.Error
+
+		for i, f := range fs {
+			if err := f(s); err != nil {
+				result = multierror.Append(result, fmt.Errorf("Check %d/%d error: %s", i+1, len(fs), err))
+			}
+		}
+
+		return result.ErrorOrNil()
+	}
+}
+
+// TestCheckResourceAttrSet is a TestCheckFunc which ensures a value
+// exists in state for the given name/key combination. It is useful when
+// testing that computed values were set, when it is not possible to
+// know ahead of time what the values will be.
+func TestCheckResourceAttrSet(name, key string) TestCheckFunc {
+	return func(s *terraform.State) error {
+		is, err := primaryInstanceState(s, name)
+		if err != nil {
+			return err
+		}
+
+		if val, ok := is.Attributes[key]; ok && val != "" {
+			return nil
+		}
+
+		return fmt.Errorf("%s: Attribute '%s' expected to be set", name, key)
+	}
+}
+
+// TestCheckResourceAttr is a TestCheckFunc which validates
+// the value in state for the given name/key combination.
 func TestCheckResourceAttr(name, key, value string) TestCheckFunc {
 	return func(s *terraform.State) error {
-		ms := s.RootModule()
-		rs, ok := ms.Resources[name]
-		if !ok {
-			return fmt.Errorf("Not found: %s", name)
+		is, err := primaryInstanceState(s, name)
+		if err != nil {
+			return err
 		}
 
-		is := rs.Primary
-		if is == nil {
-			return fmt.Errorf("No primary instance: %s", name)
-		}
+		if v, ok := is.Attributes[key]; !ok || v != value {
+			if !ok {
+				return fmt.Errorf("%s: Attribute '%s' not found", name, key)
+			}
 
-		if is.Attributes[key] != value {
 			return fmt.Errorf(
 				"%s: Attribute '%s' expected %#v, got %#v",
 				name,
 				key,
 				value,
-				is.Attributes[key])
+				v)
 		}
 
 		return nil
 	}
 }
 
-func TestMatchResourceAttr(name, key string, r *regexp.Regexp) TestCheckFunc {
+// TestCheckNoResourceAttr is a TestCheckFunc which ensures that
+// NO value exists in state for the given name/key combination.
+func TestCheckNoResourceAttr(name, key string) TestCheckFunc {
 	return func(s *terraform.State) error {
-		ms := s.RootModule()
-		rs, ok := ms.Resources[name]
-		if !ok {
-			return fmt.Errorf("Not found: %s", name)
+		is, err := primaryInstanceState(s, name)
+		if err != nil {
+			return err
 		}
 
-		is := rs.Primary
-		if is == nil {
-			return fmt.Errorf("No primary instance: %s", name)
+		if _, ok := is.Attributes[key]; ok {
+			return fmt.Errorf("%s: Attribute '%s' found when not expected", name, key)
+		}
+
+		return nil
+	}
+}
+
+// TestMatchResourceAttr is a TestCheckFunc which checks that the value
+// in state for the given name/key combination matches the given regex.
+func TestMatchResourceAttr(name, key string, r *regexp.Regexp) TestCheckFunc {
+	return func(s *terraform.State) error {
+		is, err := primaryInstanceState(s, name)
+		if err != nil {
+			return err
 		}
 
 		if !r.MatchString(is.Attributes[key]) {
@@ -387,6 +676,82 @@ func TestCheckResourceAttrPtr(name string, key string, value *string) TestCheckF
 	}
 }
 
+// TestCheckResourceAttrPair is a TestCheckFunc which validates that the values
+// in state for a pair of name/key combinations are equal.
+func TestCheckResourceAttrPair(nameFirst, keyFirst, nameSecond, keySecond string) TestCheckFunc {
+	return func(s *terraform.State) error {
+		isFirst, err := primaryInstanceState(s, nameFirst)
+		if err != nil {
+			return err
+		}
+		vFirst, ok := isFirst.Attributes[keyFirst]
+		if !ok {
+			return fmt.Errorf("%s: Attribute '%s' not found", nameFirst, keyFirst)
+		}
+
+		isSecond, err := primaryInstanceState(s, nameSecond)
+		if err != nil {
+			return err
+		}
+		vSecond, ok := isSecond.Attributes[keySecond]
+		if !ok {
+			return fmt.Errorf("%s: Attribute '%s' not found", nameSecond, keySecond)
+		}
+
+		if vFirst != vSecond {
+			return fmt.Errorf(
+				"%s: Attribute '%s' expected %#v, got %#v",
+				nameFirst,
+				keyFirst,
+				vSecond,
+				vFirst)
+		}
+
+		return nil
+	}
+}
+
+// TestCheckOutput checks an output in the Terraform configuration
+func TestCheckOutput(name, value string) TestCheckFunc {
+	return func(s *terraform.State) error {
+		ms := s.RootModule()
+		rs, ok := ms.Outputs[name]
+		if !ok {
+			return fmt.Errorf("Not found: %s", name)
+		}
+
+		if rs.Value != value {
+			return fmt.Errorf(
+				"Output '%s': expected %#v, got %#v",
+				name,
+				value,
+				rs)
+		}
+
+		return nil
+	}
+}
+
+func TestMatchOutput(name string, r *regexp.Regexp) TestCheckFunc {
+	return func(s *terraform.State) error {
+		ms := s.RootModule()
+		rs, ok := ms.Outputs[name]
+		if !ok {
+			return fmt.Errorf("Not found: %s", name)
+		}
+
+		if !r.MatchString(rs.Value.(string)) {
+			return fmt.Errorf(
+				"Output '%s': %#v didn't match %q",
+				name,
+				rs,
+				r.String())
+		}
+
+		return nil
+	}
+}
+
 // TestT is the interface used to handle the test lifecycle of a test.
 //
 // Users should just use a *testing.T object, which implements this.
@@ -398,3 +763,19 @@ type TestT interface {
 
 // This is set to true by unit tests to alter some behavior
 var testTesting = false
+
+// primaryInstanceState returns the primary instance state for the given resource name.
+func primaryInstanceState(s *terraform.State, name string) (*terraform.InstanceState, error) {
+	ms := s.RootModule()
+	rs, ok := ms.Resources[name]
+	if !ok {
+		return nil, fmt.Errorf("Not found: %s", name)
+	}
+
+	is := rs.Primary
+	if is == nil {
+		return nil, fmt.Errorf("No primary instance: %s", name)
+	}
+
+	return is, nil
+}

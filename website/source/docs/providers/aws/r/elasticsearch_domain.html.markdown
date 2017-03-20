@@ -1,7 +1,7 @@
 ---
 layout: "aws"
 page_title: "AWS: aws_elasticsearch_domain"
-sidebar_current: "docs-aws-elasticsearch-domain"
+sidebar_current: "docs-aws-resource-elasticsearch-domain"
 description: |-
   Provides an ElasticSearch Domain.
 ---
@@ -13,12 +13,14 @@ description: |-
 
 ```
 resource "aws_elasticsearch_domain" "es" {
-	domain_name = "tf-test"
-	advanced_options {
-		"rest.action.multi.allow_explicit_index" = true
-	}
+  domain_name           = "tf-test"
+  elasticsearch_version = "1.5"
 
-	access_policies = <<CONFIG
+  advanced_options {
+    "rest.action.multi.allow_explicit_index" = true
+  }
+
+  access_policies = <<CONFIG
 {
 	"Version": "2012-10-17",
 	"Statement": [
@@ -34,9 +36,13 @@ resource "aws_elasticsearch_domain" "es" {
 }
 CONFIG
 
-	snapshot_options {
-		automated_snapshot_start_hour = 23
-	}
+  snapshot_options {
+    automated_snapshot_start_hour = 23
+  }
+
+  tags {
+    Domain = "TestDomain"
+  }
 }
 ```
 
@@ -50,12 +56,15 @@ The following arguments are supported:
 * `ebs_options` - (Optional) EBS related options, see below.
 * `cluster_config` - (Optional) Cluster configuration of the domain, see below.
 * `snapshot_options` - (Optional) Snapshot related options, see below.
+* `elasticsearch_version` - (Optional) The version of ElasticSearch to deploy. Defaults to `1.5`
+* `tags` - (Optional) A mapping of tags to assign to the resource
 
 **ebs_options** supports the following attributes:
 
 * `ebs_enabled` - (Required) Whether EBS volumes are attached to data nodes in the domain
 * `volume_type` - (Optional) The type of EBS volumes attached to data nodes.
-* `volume_size` - (Optional) The size of EBS volumes attached to data nodes.
+* `volume_size` - The size of EBS volumes attached to data nodes.
+**Required** if `ebs_enabled` is set to `true`.
 * `iops` - (Optional) The baseline input/output (I/O) performance of EBS volumes
 	attached to data nodes. Applicable only for the Provisioned IOPS EBS volume type.
 
@@ -81,3 +90,11 @@ The following attributes are exported:
 * `arn` - Amazon Resource Name (ARN) of the domain.
 * `domain_id` - Unique identifier for the domain.
 * `endpoint` - Domain-specific endpoint used to submit index, search, and data upload requests.
+
+## Import
+
+ElasticSearch domains can be imported using the `domain_name`, e.g.
+
+```
+$ terraform import aws_elasticsearch_domain.example domain_name
+```

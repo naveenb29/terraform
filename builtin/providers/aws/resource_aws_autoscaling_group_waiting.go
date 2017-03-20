@@ -32,17 +32,20 @@ func waitForASGCapacity(
 
 	log.Printf("[DEBUG] Waiting on %s for capacity...", d.Id())
 
-	return resource.Retry(wait, func() error {
-		g, err := getAwsAutoscalingGroup(d, meta)
+	return resource.Retry(wait, func() *resource.RetryError {
+		g, err := getAwsAutoscalingGroup(d.Id(), meta.(*AWSClient).autoscalingconn)
 		if err != nil {
-			return resource.RetryError{Err: err}
+			return resource.NonRetryableError(err)
 		}
 		if g == nil {
+			log.Printf("[INFO] Autoscaling Group %q not found", d.Id())
+			d.SetId("")
 			return nil
 		}
-		lbis, err := getLBInstanceStates(g, meta)
+		elbis, err := getELBInstanceStates(g, meta)
+		albis, err := getTargetGroupInstanceStates(g, meta)
 		if err != nil {
-			return resource.RetryError{Err: err}
+			return resource.NonRetryableError(err)
 		}
 
 		haveASG := 0
@@ -64,9 +67,15 @@ func waitForASGCapacity(
 			haveASG++
 
 			inAllLbs := true
-			for _, states := range lbis {
+			for _, states := range elbis {
 				state, ok := states[*i.InstanceId]
 				if !ok || !strings.EqualFold(state, "InService") {
+					inAllLbs = false
+				}
+			}
+			for _, states := range albis {
+				state, ok := states[*i.InstanceId]
+				if !ok || !strings.EqualFold(state, "healthy") {
 					inAllLbs = false
 				}
 			}
@@ -77,21 +86,22 @@ func waitForASGCapacity(
 
 		satisfied, reason := satisfiedFunc(d, haveASG, haveELB)
 
-		log.Printf("[DEBUG] %q Capacity: %d ASG, %d ELB, satisfied: %t, reason: %q",
+		log.Printf("[DEBUG] %q Capacity: %d ASG, %d ELB/ALB, satisfied: %t, reason: %q",
 			d.Id(), haveASG, haveELB, satisfied, reason)
 
 		if satisfied {
 			return nil
 		}
 
-		return fmt.Errorf("%q: Waiting up to %s: %s", d.Id(), wait, reason)
+		return resource.RetryableError(
+			fmt.Errorf("%q: Waiting up to %s: %s", d.Id(), wait, reason))
 	})
 }
 
 type capacitySatisfiedFunc func(*schema.ResourceData, int, int) (bool, string)
 
-// capacitySatifiedCreate treats all targets as minimums
-func capacitySatifiedCreate(d *schema.ResourceData, haveASG, haveELB int) (bool, string) {
+// capacitySatisfiedCreate treats all targets as minimums
+func capacitySatisfiedCreate(d *schema.ResourceData, haveASG, haveELB int) (bool, string) {
 	minASG := d.Get("min_size").(int)
 	if wantASG := d.Get("desired_capacity").(int); wantASG > 0 {
 		minASG = wantASG
@@ -111,8 +121,8 @@ func capacitySatifiedCreate(d *schema.ResourceData, haveASG, haveELB int) (bool,
 	return true, ""
 }
 
-// capacitySatifiedUpdate only cares about specific targets
-func capacitySatifiedUpdate(d *schema.ResourceData, haveASG, haveELB int) (bool, string) {
+// capacitySatisfiedUpdate only cares about specific targets
+func capacitySatisfiedUpdate(d *schema.ResourceData, haveASG, haveELB int) (bool, string) {
 	if wantASG := d.Get("desired_capacity").(int); wantASG > 0 {
 		if haveASG != wantASG {
 			return false, fmt.Sprintf(

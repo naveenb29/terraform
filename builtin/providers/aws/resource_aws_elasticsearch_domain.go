@@ -9,6 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	elasticsearch "github.com/aws/aws-sdk-go/service/elasticsearchservice"
+	"github.com/hashicorp/errwrap"
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/helper/schema"
 )
@@ -19,129 +20,145 @@ func resourceAwsElasticSearchDomain() *schema.Resource {
 		Read:   resourceAwsElasticSearchDomainRead,
 		Update: resourceAwsElasticSearchDomainUpdate,
 		Delete: resourceAwsElasticSearchDomainDelete,
+		Importer: &schema.ResourceImporter{
+			State: resourceAwsElasticSearchDomainImport,
+		},
 
 		Schema: map[string]*schema.Schema{
-			"access_policies": &schema.Schema{
-				Type:      schema.TypeString,
-				StateFunc: normalizeJson,
-				Optional:  true,
+			"access_policies": {
+				Type:             schema.TypeString,
+				Optional:         true,
+				Computed:         true,
+				ValidateFunc:     validateJsonString,
+				DiffSuppressFunc: suppressEquivalentAwsPolicyDiffs,
 			},
-			"advanced_options": &schema.Schema{
+			"advanced_options": {
 				Type:     schema.TypeMap,
 				Optional: true,
 				Computed: true,
 			},
-			"domain_name": &schema.Schema{
+			"domain_name": {
 				Type:     schema.TypeString,
 				Required: true,
 				ForceNew: true,
 				ValidateFunc: func(v interface{}, k string) (ws []string, errors []error) {
 					value := v.(string)
-					if !regexp.MustCompile(`^[0-9A-Za-z]+`).MatchString(value) {
+					if !regexp.MustCompile(`^[a-z][0-9a-z\-]{2,27}$`).MatchString(value) {
 						errors = append(errors, fmt.Errorf(
-							"%q must start with a letter or number", k))
-					}
-					if !regexp.MustCompile(`^[0-9A-Za-z][0-9a-z-]+$`).MatchString(value) {
-						errors = append(errors, fmt.Errorf(
-							"%q can only contain lowercase characters, numbers and hyphens", k))
+							"%q must start with a lowercase alphabet and be at least 3 and no more than 28 characters long. Valid characters are a-z (lowercase letters), 0-9, and - (hyphen).", k))
 					}
 					return
 				},
 			},
-			"arn": &schema.Schema{
+			"arn": {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
-			"domain_id": &schema.Schema{
+			"domain_id": {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
-			"endpoint": &schema.Schema{
+			"endpoint": {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
-			"ebs_options": &schema.Schema{
+			"ebs_options": {
 				Type:     schema.TypeList,
 				Optional: true,
 				Computed: true,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
-						"ebs_enabled": &schema.Schema{
+						"ebs_enabled": {
 							Type:     schema.TypeBool,
 							Required: true,
 						},
-						"iops": &schema.Schema{
+						"iops": {
 							Type:     schema.TypeInt,
 							Optional: true,
 						},
-						"volume_size": &schema.Schema{
+						"volume_size": {
 							Type:     schema.TypeInt,
 							Optional: true,
 						},
-						"volume_type": &schema.Schema{
+						"volume_type": {
 							Type:     schema.TypeString,
 							Optional: true,
 						},
 					},
 				},
 			},
-			"cluster_config": &schema.Schema{
+			"cluster_config": {
 				Type:     schema.TypeList,
 				Optional: true,
 				Computed: true,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
-						"dedicated_master_count": &schema.Schema{
+						"dedicated_master_count": {
 							Type:     schema.TypeInt,
 							Optional: true,
 						},
-						"dedicated_master_enabled": &schema.Schema{
+						"dedicated_master_enabled": {
 							Type:     schema.TypeBool,
 							Optional: true,
 							Default:  false,
 						},
-						"dedicated_master_type": &schema.Schema{
+						"dedicated_master_type": {
 							Type:     schema.TypeString,
 							Optional: true,
 						},
-						"instance_count": &schema.Schema{
+						"instance_count": {
 							Type:     schema.TypeInt,
 							Optional: true,
 							Default:  1,
 						},
-						"instance_type": &schema.Schema{
+						"instance_type": {
 							Type:     schema.TypeString,
 							Optional: true,
 							Default:  "m3.medium.elasticsearch",
 						},
-						"zone_awareness_enabled": &schema.Schema{
+						"zone_awareness_enabled": {
 							Type:     schema.TypeBool,
 							Optional: true,
 						},
 					},
 				},
 			},
-			"snapshot_options": &schema.Schema{
+			"snapshot_options": {
 				Type:     schema.TypeList,
 				Optional: true,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
-						"automated_snapshot_start_hour": &schema.Schema{
+						"automated_snapshot_start_hour": {
 							Type:     schema.TypeInt,
 							Required: true,
 						},
 					},
 				},
 			},
+			"elasticsearch_version": {
+				Type:     schema.TypeString,
+				Optional: true,
+				Default:  "1.5",
+				ForceNew: true,
+			},
+
+			"tags": tagsSchema(),
 		},
 	}
+}
+
+func resourceAwsElasticSearchDomainImport(
+	d *schema.ResourceData, meta interface{}) ([]*schema.ResourceData, error) {
+	d.Set("domain_name", d.Id())
+	return []*schema.ResourceData{d}, nil
 }
 
 func resourceAwsElasticSearchDomainCreate(d *schema.ResourceData, meta interface{}) error {
 	conn := meta.(*AWSClient).esconn
 
 	input := elasticsearch.CreateElasticsearchDomainInput{
-		DomainName: aws.String(d.Get("domain_name").(string)),
+		DomainName:           aws.String(d.Get("domain_name").(string)),
+		ElasticsearchVersion: aws.String(d.Get("elasticsearch_version").(string)),
 	}
 
 	if v, ok := d.GetOk("access_policies"); ok {
@@ -210,23 +227,34 @@ func resourceAwsElasticSearchDomainCreate(d *schema.ResourceData, meta interface
 	d.SetId(*out.DomainStatus.ARN)
 
 	log.Printf("[DEBUG] Waiting for ElasticSearch domain %q to be created", d.Id())
-	err = resource.Retry(15*time.Minute, func() error {
+	err = resource.Retry(60*time.Minute, func() *resource.RetryError {
 		out, err := conn.DescribeElasticsearchDomain(&elasticsearch.DescribeElasticsearchDomainInput{
 			DomainName: aws.String(d.Get("domain_name").(string)),
 		})
 		if err != nil {
-			return resource.RetryError{Err: err}
+			return resource.NonRetryableError(err)
 		}
 
 		if !*out.DomainStatus.Processing && out.DomainStatus.Endpoint != nil {
 			return nil
 		}
 
-		return fmt.Errorf("%q: Timeout while waiting for the domain to be created", d.Id())
+		return resource.RetryableError(
+			fmt.Errorf("%q: Timeout while waiting for the domain to be created", d.Id()))
 	})
 	if err != nil {
 		return err
 	}
+
+	tags := tagsFromMapElasticsearchService(d.Get("tags").(map[string]interface{}))
+
+	if err := setTagsElasticsearchService(conn, d, *out.DomainStatus.ARN); err != nil {
+		return err
+	}
+
+	d.Set("tags", tagsToMapElasticsearchService(tags))
+	d.SetPartial("tags")
+	d.Partial(false)
 
 	log.Printf("[DEBUG] ElasticSearch domain %q created", d.Id())
 
@@ -240,6 +268,11 @@ func resourceAwsElasticSearchDomainRead(d *schema.ResourceData, meta interface{}
 		DomainName: aws.String(d.Get("domain_name").(string)),
 	})
 	if err != nil {
+		if ec2err, ok := err.(awserr.Error); ok && ec2err.Code() == "ResourceNotFoundException" {
+			log.Printf("[INFO] ElasticSearch Domain %q not found", d.Get("domain_name").(string))
+			d.SetId("")
+			return nil
+		}
 		return err
 	}
 
@@ -248,14 +281,20 @@ func resourceAwsElasticSearchDomainRead(d *schema.ResourceData, meta interface{}
 	ds := out.DomainStatus
 
 	if ds.AccessPolicies != nil && *ds.AccessPolicies != "" {
-		d.Set("access_policies", normalizeJson(*ds.AccessPolicies))
+		policies, err := normalizeJsonString(*ds.AccessPolicies)
+		if err != nil {
+			return errwrap.Wrapf("access policies contain an invalid JSON: {{err}}", err)
+		}
+		d.Set("access_policies", policies)
 	}
 	err = d.Set("advanced_options", pointersMapToStringList(ds.AdvancedOptions))
 	if err != nil {
 		return err
 	}
-	d.Set("domain_id", *ds.DomainId)
-	d.Set("domain_name", *ds.DomainName)
+	d.SetId(*ds.ARN)
+	d.Set("domain_id", ds.DomainId)
+	d.Set("domain_name", ds.DomainName)
+	d.Set("elasticsearch_version", ds.ElasticsearchVersion)
 	if ds.Endpoint != nil {
 		d.Set("endpoint", *ds.Endpoint)
 	}
@@ -274,13 +313,35 @@ func resourceAwsElasticSearchDomainRead(d *schema.ResourceData, meta interface{}
 		})
 	}
 
-	d.Set("arn", *ds.ARN)
+	d.Set("arn", ds.ARN)
+
+	listOut, err := conn.ListTags(&elasticsearch.ListTagsInput{
+		ARN: ds.ARN,
+	})
+
+	if err != nil {
+		return err
+	}
+	var est []*elasticsearch.Tag
+	if len(listOut.TagList) > 0 {
+		est = listOut.TagList
+	}
+
+	d.Set("tags", tagsToMapElasticsearchService(est))
 
 	return nil
 }
 
 func resourceAwsElasticSearchDomainUpdate(d *schema.ResourceData, meta interface{}) error {
 	conn := meta.(*AWSClient).esconn
+
+	d.Partial(true)
+
+	if err := setTagsElasticsearchService(conn, d, d.Id()); err != nil {
+		return err
+	} else {
+		d.SetPartial("tags")
+	}
 
 	input := elasticsearch.UpdateElasticsearchDomainConfigInput{
 		DomainName: aws.String(d.Get("domain_name").(string)),
@@ -337,23 +398,26 @@ func resourceAwsElasticSearchDomainUpdate(d *schema.ResourceData, meta interface
 		return err
 	}
 
-	err = resource.Retry(25*time.Minute, func() error {
+	err = resource.Retry(60*time.Minute, func() *resource.RetryError {
 		out, err := conn.DescribeElasticsearchDomain(&elasticsearch.DescribeElasticsearchDomainInput{
 			DomainName: aws.String(d.Get("domain_name").(string)),
 		})
 		if err != nil {
-			return resource.RetryError{Err: err}
+			return resource.NonRetryableError(err)
 		}
 
 		if *out.DomainStatus.Processing == false {
 			return nil
 		}
 
-		return fmt.Errorf("%q: Timeout while waiting for changes to be processed", d.Id())
+		return resource.RetryableError(
+			fmt.Errorf("%q: Timeout while waiting for changes to be processed", d.Id()))
 	})
 	if err != nil {
 		return err
 	}
+
+	d.Partial(false)
 
 	return resourceAwsElasticSearchDomainRead(d, meta)
 }
@@ -370,7 +434,7 @@ func resourceAwsElasticSearchDomainDelete(d *schema.ResourceData, meta interface
 	}
 
 	log.Printf("[DEBUG] Waiting for ElasticSearch domain %q to be deleted", d.Get("domain_name").(string))
-	err = resource.Retry(15*time.Minute, func() error {
+	err = resource.Retry(90*time.Minute, func() *resource.RetryError {
 		out, err := conn.DescribeElasticsearchDomain(&elasticsearch.DescribeElasticsearchDomainInput{
 			DomainName: aws.String(d.Get("domain_name").(string)),
 		})
@@ -378,21 +442,22 @@ func resourceAwsElasticSearchDomainDelete(d *schema.ResourceData, meta interface
 		if err != nil {
 			awsErr, ok := err.(awserr.Error)
 			if !ok {
-				return resource.RetryError{Err: err}
+				return resource.NonRetryableError(err)
 			}
 
 			if awsErr.Code() == "ResourceNotFoundException" {
 				return nil
 			}
 
-			return resource.RetryError{Err: awsErr}
+			return resource.NonRetryableError(err)
 		}
 
 		if !*out.DomainStatus.Processing {
 			return nil
 		}
 
-		return fmt.Errorf("%q: Timeout while waiting for the domain to be deleted", d.Id())
+		return resource.RetryableError(
+			fmt.Errorf("%q: Timeout while waiting for the domain to be deleted", d.Id()))
 	})
 
 	d.SetId("")

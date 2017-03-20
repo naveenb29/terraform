@@ -5,11 +5,34 @@ import (
 	"strconv"
 	"testing"
 
+	"strings"
+
 	"github.com/digitalocean/godo"
 	"github.com/hashicorp/terraform/helper/acctest"
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/terraform"
 )
+
+func TestDigitalOceanRecordConstructFqdn(t *testing.T) {
+	cases := []struct {
+		Input, Output string
+	}{
+		{"www", "www.nonexample.com"},
+		{"dev.www", "dev.www.nonexample.com"},
+		{"*", "*.nonexample.com"},
+		{"nonexample.com", "nonexample.com"},
+		{"test.nonexample.com", "test.nonexample.com"},
+		{"test.nonexample.com.", "test.nonexample.com"},
+	}
+
+	domain := "nonexample.com"
+	for _, tc := range cases {
+		actual := constructFqdn(tc.Input, domain)
+		if actual != tc.Output {
+			t.Fatalf("input: %s\noutput: %s", tc.Input, actual)
+		}
+	}
+}
 
 func TestAccDigitalOceanRecord_Basic(t *testing.T) {
 	var record godo.DomainRecord
@@ -20,7 +43,7 @@ func TestAccDigitalOceanRecord_Basic(t *testing.T) {
 		Providers:    testAccProviders,
 		CheckDestroy: testAccCheckDigitalOceanRecordDestroy,
 		Steps: []resource.TestStep{
-			resource.TestStep{
+			{
 				Config: fmt.Sprintf(testAccCheckDigitalOceanRecordConfig_basic, domain),
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckDigitalOceanRecordExists("digitalocean_record.foobar", &record),
@@ -31,6 +54,8 @@ func TestAccDigitalOceanRecord_Basic(t *testing.T) {
 						"digitalocean_record.foobar", "domain", domain),
 					resource.TestCheckResourceAttr(
 						"digitalocean_record.foobar", "value", "192.168.0.10"),
+					resource.TestCheckResourceAttr(
+						"digitalocean_record.foobar", "fqdn", strings.Join([]string{"terraform", domain}, ".")),
 				),
 			},
 		},
@@ -46,7 +71,7 @@ func TestAccDigitalOceanRecord_Updated(t *testing.T) {
 		Providers:    testAccProviders,
 		CheckDestroy: testAccCheckDigitalOceanRecordDestroy,
 		Steps: []resource.TestStep{
-			resource.TestStep{
+			{
 				Config: fmt.Sprintf(testAccCheckDigitalOceanRecordConfig_basic, domain),
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckDigitalOceanRecordExists("digitalocean_record.foobar", &record),
@@ -61,7 +86,7 @@ func TestAccDigitalOceanRecord_Updated(t *testing.T) {
 						"digitalocean_record.foobar", "type", "A"),
 				),
 			},
-			resource.TestStep{
+			{
 				Config: fmt.Sprintf(
 					testAccCheckDigitalOceanRecordConfig_new_value, domain),
 				Check: resource.ComposeTestCheckFunc(
@@ -90,7 +115,7 @@ func TestAccDigitalOceanRecord_HostnameValue(t *testing.T) {
 		Providers:    testAccProviders,
 		CheckDestroy: testAccCheckDigitalOceanRecordDestroy,
 		Steps: []resource.TestStep{
-			resource.TestStep{
+			{
 				Config: fmt.Sprintf(
 					testAccCheckDigitalOceanRecordConfig_cname, domain),
 				Check: resource.ComposeTestCheckFunc(
@@ -119,7 +144,7 @@ func TestAccDigitalOceanRecord_ExternalHostnameValue(t *testing.T) {
 		Providers:    testAccProviders,
 		CheckDestroy: testAccCheckDigitalOceanRecordDestroy,
 		Steps: []resource.TestStep{
-			resource.TestStep{
+			{
 				Config: fmt.Sprintf(
 					testAccCheckDigitalOceanRecordConfig_external_cname, domain),
 				Check: resource.ComposeTestCheckFunc(

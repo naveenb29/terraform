@@ -57,7 +57,7 @@ module "consul" {
 
 (Note that the `provider` block can be omitted in favor of environment
 variables. See the [AWS Provider docs](/docs/providers/aws/index.html)
-for details.)
+for details.  This module requires that your AWS account has a default VPC.)
 
 The `module` block tells Terraform to create and manage a module. It is
 very similar to the `resource` block. It has a logical name -- in this
@@ -83,7 +83,7 @@ $ terraform get
 
 This command will download the modules if they haven't been already.
 By default, the command will not check for updates, so it is safe (and fast)
-to run multiple times. You can use the `-u` flag to check and download
+to run multiple times. You can use the `-update` flag to check and download
 updates.
 
 ## Planning and Apply Modules
@@ -160,6 +160,4 @@ For more information on modules, the types of sources supported, how
 to write modules, and more, read the in depth
 [module documentation](/docs/modules/index.html).
 
-We've now concluded the getting started guide, however
-there are a number of [next steps](/intro/getting-started/next-steps.html)
-to get started with Terraform.
+Next, we learn how to [use Terraform remotely and the associated benefits](/intro/getting-started/remote.html).

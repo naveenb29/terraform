@@ -2,7 +2,10 @@ package aws
 
 import (
 	"fmt"
+	"strings"
 	"testing"
+
+	"regexp"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -19,11 +22,36 @@ func TestAccAWSRole_basic(t *testing.T) {
 		Providers:    testAccProviders,
 		CheckDestroy: testAccCheckAWSRoleDestroy,
 		Steps: []resource.TestStep{
-			resource.TestStep{
+			{
 				Config: testAccAWSRoleConfig,
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckAWSRoleExists("aws_iam_role.role", &conf),
 					testAccCheckAWSRoleAttributes(&conf),
+					resource.TestCheckResourceAttrSet(
+						"aws_iam_role.role", "create_date",
+					),
+				),
+			},
+		},
+	})
+}
+
+func TestAccAWSRole_namePrefix(t *testing.T) {
+	var conf iam.GetRoleOutput
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:        func() { testAccPreCheck(t) },
+		IDRefreshName:   "aws_iam_role.role",
+		IDRefreshIgnore: []string{"name_prefix"},
+		Providers:       testAccProviders,
+		CheckDestroy:    testAccCheckAWSRoleDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccAWSRolePrefixNameConfig,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckAWSRoleExists("aws_iam_role.role", &conf),
+					testAccCheckAWSRoleGeneratedNamePrefix(
+						"aws_iam_role.role", "test-role-"),
 				),
 			},
 		},
@@ -38,18 +66,32 @@ func TestAccAWSRole_testNameChange(t *testing.T) {
 		Providers:    testAccProviders,
 		CheckDestroy: testAccCheckAWSRoleDestroy,
 		Steps: []resource.TestStep{
-			resource.TestStep{
+			{
 				Config: testAccAWSRolePre,
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckAWSRoleExists("aws_iam_role.role_update_test", &conf),
 				),
 			},
 
-			resource.TestStep{
+			{
 				Config: testAccAWSRolePost,
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckAWSRoleExists("aws_iam_role.role_update_test", &conf),
 				),
+			},
+		},
+	})
+}
+
+func TestAccAWSRole_badJSON(t *testing.T) {
+	resource.Test(t, resource.TestCase{
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSRoleDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config:      testAccAWSRoleConfig_badJson,
+				ExpectError: regexp.MustCompile(`.*contains an invalid JSON:.*`),
 			},
 		},
 	})
@@ -110,6 +152,23 @@ func testAccCheckAWSRoleExists(n string, res *iam.GetRoleOutput) resource.TestCh
 	}
 }
 
+func testAccCheckAWSRoleGeneratedNamePrefix(resource, prefix string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		r, ok := s.RootModule().Resources[resource]
+		if !ok {
+			return fmt.Errorf("Resource not found")
+		}
+		name, ok := r.Primary.Attributes["name"]
+		if !ok {
+			return fmt.Errorf("Name attr not found: %#v", r.Primary.Attributes)
+		}
+		if !strings.HasPrefix(name, prefix) {
+			return fmt.Errorf("Name: %q, does not have prefix: %q", name, prefix)
+		}
+		return nil
+	}
+}
+
 func testAccCheckAWSRoleAttributes(role *iam.GetRoleOutput) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
 		if *role.Role.RoleName != "test-role" {
@@ -125,9 +184,17 @@ func testAccCheckAWSRoleAttributes(role *iam.GetRoleOutput) resource.TestCheckFu
 
 const testAccAWSRoleConfig = `
 resource "aws_iam_role" "role" {
-	name   = "test-role"
-	path = "/"
-	assume_role_policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":[\"ec2.amazonaws.com\"]},\"Action\":[\"sts:AssumeRole\"]}]}"
+  name   = "test-role"
+  path = "/"
+  assume_role_policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":[\"ec2.amazonaws.com\"]},\"Action\":[\"sts:AssumeRole\"]}]}"
+}
+`
+
+const testAccAWSRolePrefixNameConfig = `
+resource "aws_iam_role" "role" {
+  name_prefix = "test-role-"
+  path = "/"
+  assume_role_policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":[\"ec2.amazonaws.com\"]},\"Action\":[\"sts:AssumeRole\"]}]}"
 }
 `
 
@@ -228,3 +295,24 @@ resource "aws_iam_instance_profile" "role_update_test" {
 }
 
 `
+
+const testAccAWSRoleConfig_badJson = `
+	resource "aws_iam_role" "my_instance_role" {
+  name = "test-role"
+
+  assume_role_policy = <<POLICY
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Action": "sts:AssumeRole",
+            "Principal": {
+                "Service": "ec2.amazonaws.com",
+            },
+            "Effect": "Allow",
+            "Sid": ""
+        }
+    ]
+}
+POLICY
+}`
